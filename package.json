@@ -6,8 +6,16 @@
   "scripts": {
     "start": "node index.js"
   },
-  "keywords": [],
-  "author": "",
+    "keywords": [
+	"diploma",
+    "education",
+    "credential",
+    "verification",
+    "api",
+    "nodejs",
+    "express"
+    ],
+  "author": "RR",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
@@ -16,7 +24,6 @@
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.2",
-      "jwks-rsa": "^3.2.0",
-      "engines": {"node": ">18"}
-  }
+      "jwks-rsa": "^3.2.0"
+    }
 }
