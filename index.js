@@ -4,12 +4,15 @@ const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const jwksRsa = require('jwks-rsa');
 const { createClient } = require('@supabase/supabase-js');
+
+
+const app = express();
+
 const allowedOrigins = [
   'https://ausa.io',
   'https://www.ausa.io',
   'http://localhost:5173', // for local dev
 ];
-const app = express();
 
 
 app.use(
@@ -27,7 +30,7 @@ app.use(
 );
 
 // Handle preflight explicitly (optional but helpful)
-app.options('*', cors());
+
 
 
 app.use(express.json());
