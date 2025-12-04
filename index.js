@@ -4,9 +4,32 @@ const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const jwksRsa = require('jwks-rsa');
 const { createClient } = require('@supabase/supabase-js');
-
+const allowedOrigins = [
+  'https://ausa.io',
+  'https://www.ausa.io',
+  'http://localhost:5173', // for local dev
+];
 const app = express();
-app.use(cors());
+
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      // Allow requests with no origin (e.g. curl, Postman) and whitelisted origins
+      if (!origin || allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+      return callback(new Error('Not allowed by CORS'));
+    },
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Authorization', 'Content-Type'],
+  })
+);
+
+// Handle preflight explicitly (optional but helpful)
+app.options('*', cors());
+
+
 app.use(express.json());
 
 // Supabase client with service role key
