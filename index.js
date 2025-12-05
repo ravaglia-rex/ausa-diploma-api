@@ -6,6 +6,7 @@ const jwksRsa = require('jwks-rsa');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
+app.set('etag', false); // 👈 disable 304/ETag for API responses
 
 // ---------- CORS ----------
 const allowedOrigins = [
