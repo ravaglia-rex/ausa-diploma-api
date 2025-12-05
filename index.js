@@ -5,15 +5,14 @@ const jwt = require('jsonwebtoken');
 const jwksRsa = require('jwks-rsa');
 const { createClient } = require('@supabase/supabase-js');
 
-
 const app = express();
 
+// ---------- CORS ----------
 const allowedOrigins = [
   'https://ausa.io',
   'https://www.ausa.io',
   'http://localhost:5173', // for local dev
 ];
-
 
 app.use(
   cors({
@@ -29,19 +28,15 @@ app.use(
   })
 );
 
-// Handle preflight explicitly (optional but helpful)
-
-
-
 app.use(express.json());
 
-// Supabase client with service role key
+// ---------- Supabase client (service role) ----------
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// Auth0 JWT verification setup
+// ---------- Auth0 JWT verification ----------
 const jwksClient = jwksRsa({
   jwksUri: `https://${process.env.AUTH0_DOMAIN}/.well-known/jwks.json`,
 });
@@ -69,7 +64,7 @@ function authenticateJwt(req, res, next) {
 
   jwt.verify(token, getKey, options, (err, decoded) => {
     if (err) {
-      console.error('JWT verify error', err);
+      console.error('JWT verify error:', err.name, err.message);
       return res.status(401).json({ error: 'Invalid token' });
     }
 
@@ -78,12 +73,16 @@ function authenticateJwt(req, res, next) {
   });
 }
 
-// Helper: check if user has admin role
+// ---------- Helper: admin role check ----------
 function isAdmin(user) {
   const roles =
-    user['https://ausa.io/claims/roles'] || user.roles || [];
+    user?.['https://ausa.io/claims/roles'] || user?.roles || [];
   return Array.isArray(roles) && roles.includes('ausa_admin');
 }
+
+// --------------------------------------------------
+//  STUDENT-FACING ROUTES
+// --------------------------------------------------
 
 // GET /api/diploma/me
 app.get('/api/diploma/me', authenticateJwt, async (req, res) => {
@@ -134,7 +133,6 @@ app.get('/api/diploma/me/items', authenticateJwt, async (req, res) => {
 
 // GET /api/diploma/announcements
 app.get('/api/diploma/announcements', authenticateJwt, async (req, res) => {
-  // Optionally use cohort from student for filtering
   const auth0Sub = req.user.sub;
 
   const { data: student } = await supabase
@@ -151,7 +149,6 @@ app.get('/api/diploma/announcements', authenticateJwt, async (req, res) => {
     .lte('starts_at', now)
     .or('ends_at.is.null,ends_at.gt.' + now);
 
-  // Basic example: show all_diploma + cohort-specific
   if (student?.cohort) {
     query = query.in('audience', ['all_diploma', `cohort_${student.cohort}`]);
   } else {
@@ -170,7 +167,12 @@ app.get('/api/diploma/announcements', authenticateJwt, async (req, res) => {
   res.json(data);
 });
 
-// Admin-only example: GET /api/diploma/students
+// --------------------------------------------------
+//  LEGACY ADMIN STUDENTS LIST (OPTIONAL)
+//  (You can keep or remove this if unused)
+// --------------------------------------------------
+
+// GET /api/diploma/students  (admin-only)
 app.get('/api/diploma/students', authenticateJwt, async (req, res) => {
   if (!isAdmin(req.user)) {
     return res.status(403).json({ error: 'Admin role required' });
@@ -189,6 +191,9 @@ app.get('/api/diploma/students', authenticateJwt, async (req, res) => {
   res.json(data);
 });
 
+// --------------------------------------------------
+//  ADMIN ROUTES (for /diploma/admin UI)
+// --------------------------------------------------
 
 // GET /api/diploma/admin/students
 app.get('/api/diploma/admin/students', authenticateJwt, async (req, res) => {
@@ -197,6 +202,7 @@ app.get('/api/diploma/admin/students', authenticateJwt, async (req, res) => {
   }
 
   const { query = '', cohort = '' } = req.query;
+
   let sb = supabase
     .from('diploma_students')
     .select('id, full_name, email, cohort, auth0_sub, created_at')
@@ -204,9 +210,7 @@ app.get('/api/diploma/admin/students', authenticateJwt, async (req, res) => {
 
   if (query) {
     const q = `%${query}%`;
-    sb = sb.or(
-      `full_name.ilike.${q},email.ilike.${q}`
-    );
+    sb = sb.or(`full_name.ilike.${q},email.ilike.${q}`);
   }
 
   if (cohort) {
@@ -272,9 +276,10 @@ app.get(
   }
 );
 
-
-
+// --------------------------------------------------
+//  START SERVER
+// --------------------------------------------------
 const port = process.env.PORT || 4000;
 app.listen(port, () => {
-  console.log(`Diploma API listening on http://localhost:${port}`);
+  console.log(`Diploma API listening on port ${port}`);
 });
