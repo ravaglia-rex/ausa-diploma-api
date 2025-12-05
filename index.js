@@ -189,6 +189,91 @@ app.get('/api/diploma/students', authenticateJwt, async (req, res) => {
   res.json(data);
 });
 
+
+// GET /api/diploma/admin/students
+app.get('/api/diploma/admin/students', authenticateJwt, async (req, res) => {
+  if (!isAdmin(req.user)) {
+    return res.status(403).json({ error: 'Admin role required' });
+  }
+
+  const { query = '', cohort = '' } = req.query;
+  let sb = supabase
+    .from('diploma_students')
+    .select('id, full_name, email, cohort, auth0_sub, created_at')
+    .order('full_name', { ascending: true });
+
+  if (query) {
+    const q = `%${query}%`;
+    sb = sb.or(
+      `full_name.ilike.${q},email.ilike.${q}`
+    );
+  }
+
+  if (cohort) {
+    sb = sb.eq('cohort', cohort);
+  }
+
+  const { data, error } = await sb;
+
+  if (error) {
+    console.error('Error fetching admin students', error);
+    return res.status(500).json({ error: 'Failed to fetch students' });
+  }
+
+  res.json(data || []);
+});
+
+// GET /api/diploma/admin/students/:id
+app.get(
+  '/api/diploma/admin/students/:id',
+  authenticateJwt,
+  async (req, res) => {
+    if (!isAdmin(req.user)) {
+      return res.status(403).json({ error: 'Admin role required' });
+    }
+
+    const id = req.params.id;
+
+    const { data, error } = await supabase
+      .from('diploma_students')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (error) {
+      console.error('Error fetching admin student detail', error);
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    res.json(data);
+  }
+);
+
+// GET /api/diploma/admin/announcements
+app.get(
+  '/api/diploma/admin/announcements',
+  authenticateJwt,
+  async (req, res) => {
+    if (!isAdmin(req.user)) {
+      return res.status(403).json({ error: 'Admin role required' });
+    }
+
+    const { data, error } = await supabase
+      .from('diploma_announcements')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Error fetching admin announcements', error);
+      return res.status(500).json({ error: 'Failed to fetch announcements' });
+    }
+
+    res.json(data || []);
+  }
+);
+
+
+
 const port = process.env.PORT || 4000;
 app.listen(port, () => {
   console.log(`Diploma API listening on http://localhost:${port}`);
