@@ -227,6 +227,56 @@ app.get('/api/diploma/admin/students', authenticateJwt, async (req, res) => {
   res.json(data || []);
 });
 
+
+
+// PATCH /api/diploma/admin/students/:id
+app.patch(
+  '/api/diploma/admin/students/:id',
+  authenticateJwt,
+  async (req, res) => {
+    if (!isAdmin(req.user)) {
+      return res.status(403).json({ error: 'Admin role required' });
+    }
+
+    const id = req.params.id;
+    const { cohort, drive_binder_url, drive_folder_url, full_name, email } =
+      req.body || {};
+
+    const update = {};
+    if (cohort !== undefined) update.cohort = cohort;
+    if (drive_binder_url !== undefined) update.drive_binder_url = drive_binder_url;
+    if (drive_folder_url !== undefined) update.drive_folder_url = drive_folder_url;
+    if (full_name !== undefined) update.full_name = full_name;
+    if (email !== undefined) update.email = email;
+
+    if (Object.keys(update).length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+
+    try {
+      const { data, error } = await supabase
+        .from('diploma_students')
+        .update(update)
+        .eq('id', id)
+        .select('*')
+        .single();
+
+      if (error) {
+        console.error('Error updating admin student', error);
+        return res.status(500).json({ error: 'Failed to update student' });
+      }
+
+      return res.json(data);
+    } catch (err) {
+      console.error('Unexpected error updating student', err);
+      return res
+        .status(500)
+        .json({ error: 'Unexpected server error updating student' });
+    }
+  }
+);
+
+
 // GET /api/diploma/admin/students/:id
 app.get(
   '/api/diploma/admin/students/:id',
@@ -275,6 +325,56 @@ app.get(
     res.json(data || []);
   }
 );
+
+// POST /api/diploma/admin/announcements
+app.post(
+  '/api/diploma/admin/announcements',
+  authenticateJwt,
+  async (req, res) => {
+    if (!isAdmin(req.user)) {
+      return res.status(403).json({ error: 'Admin role required' });
+    }
+
+    const { title, body, drive_link_url, audience, starts_at, ends_at } =
+      req.body || {};
+
+    if (!title) {
+      return res.status(400).json({ error: 'Title is required' });
+    }
+
+    const nowIso = new Date().toISOString();
+
+    const insert = {
+      title,
+      body: body || '',
+      drive_link_url: drive_link_url || null,
+      audience: audience || 'all_diploma',
+      starts_at: starts_at || nowIso,
+      ends_at: ends_at || null,
+    };
+
+    try {
+      const { data, error } = await supabase
+        .from('diploma_announcements')
+        .insert(insert)
+        .select('*')
+        .single();
+
+      if (error) {
+        console.error('Error creating admin announcement', error);
+        return res.status(500).json({ error: 'Failed to create announcement' });
+      }
+
+      return res.status(201).json(data);
+    } catch (err) {
+      console.error('Unexpected error creating announcement', err);
+      return res
+        .status(500)
+        .json({ error: 'Unexpected server error creating announcement' });
+    }
+  }
+);
+
 
 // --------------------------------------------------
 //  START SERVER
