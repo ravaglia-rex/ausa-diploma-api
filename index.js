@@ -8,7 +8,7 @@ const { createClient } = require('@supabase/supabase-js');
 const app = express();
 app.set('etag', false); // 👈 disable 304/ETag for API responses
 
-// ---------- CORS ----------
+{/* // ---------- CORS ----------
 const allowedOrigins = [
   'https://ausa.io',
   'https://www.ausa.io',
@@ -27,7 +27,18 @@ app.use(
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Authorization', 'Content-Type'],
   })
+); */}
+
+// ---------- CORS ----------
+// TEMP: allow all origins while we sort out domains
+app.use(
+  cors({
+    origin: true, // reflect request origin, effectively allowing all
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Authorization', 'Content-Type'],
+  })
 );
+
 
 app.use(express.json());
 
