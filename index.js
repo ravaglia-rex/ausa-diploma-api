@@ -151,7 +151,10 @@ app.get('/api/diploma/announcements', authenticateJwt, async (req, res) => {
     .or('ends_at.is.null,ends_at.gt.' + now);
 
   if (student?.cohort) {
-    query = query.in('audience', ['all_diploma', `cohort_${student.cohort}`]);
+    query = query.in('audience', [
+      'all_diploma',
+      `cohort_${student.cohort}`,
+    ]);
   } else {
     query = query.eq('audience', 'all_diploma');
   }
@@ -170,7 +173,6 @@ app.get('/api/diploma/announcements', authenticateJwt, async (req, res) => {
 
 // --------------------------------------------------
 //  LEGACY ADMIN STUDENTS LIST (OPTIONAL)
-//  (You can keep or remove this if unused)
 // --------------------------------------------------
 
 // GET /api/diploma/students  (admin-only)
@@ -228,8 +230,6 @@ app.get('/api/diploma/admin/students', authenticateJwt, async (req, res) => {
   res.json(data || []);
 });
 
-
-
 // PATCH /api/diploma/admin/students/:id
 app.patch(
   '/api/diploma/admin/students/:id',
@@ -240,13 +240,20 @@ app.patch(
     }
 
     const id = req.params.id;
-    const { cohort, drive_binder_url, drive_folder_url, full_name, email } =
-      req.body || {};
+    const {
+      cohort,
+      drive_binder_url,
+      drive_folder_url,
+      full_name,
+      email,
+    } = req.body || {};
 
     const update = {};
     if (cohort !== undefined) update.cohort = cohort;
-    if (drive_binder_url !== undefined) update.drive_binder_url = drive_binder_url;
-    if (drive_folder_url !== undefined) update.drive_folder_url = drive_folder_url;
+    if (drive_binder_url !== undefined)
+      update.drive_binder_url = drive_binder_url;
+    if (drive_folder_url !== undefined)
+      update.drive_folder_url = drive_folder_url;
     if (full_name !== undefined) update.full_name = full_name;
     if (email !== undefined) update.email = email;
 
@@ -277,7 +284,6 @@ app.patch(
   }
 );
 
-
 // GET /api/diploma/admin/students/:id
 app.get(
   '/api/diploma/admin/students/:id',
@@ -303,6 +309,114 @@ app.get(
     res.json(data);
   }
 );
+
+// --------------------------------------------------
+//  ADMIN – PER-STUDENT ITEMS (Phase 1.1–1.2)
+// --------------------------------------------------
+
+// GET /api/diploma/admin/students/:studentId/items
+app.get(
+  '/api/diploma/admin/students/:studentId/items',
+  authenticateJwt,
+  async (req, res) => {
+    if (!isAdmin(req.user)) {
+      return res.status(403).json({ error: 'Admin role required' });
+    }
+
+    const studentId = req.params.studentId; // UUID string
+
+    if (!studentId) {
+      return res.status(400).json({ error: 'Student id is required' });
+    }
+
+    const { data, error } = await supabase
+      .from('diploma_student_items')
+      .select('*')
+      .eq('student_id', studentId)
+      .order('due_date', { ascending: true, nullsLast: true })
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Error fetching admin student items', error);
+      return res
+        .status(500)
+        .json({ error: 'Failed to fetch student items' });
+    }
+
+    res.json(data || []);
+  }
+);
+
+// POST /api/diploma/admin/students/:studentId/items
+app.post(
+  '/api/diploma/admin/students/:studentId/items',
+  authenticateJwt,
+  async (req, res) => {
+    if (!isAdmin(req.user)) {
+      return res.status(403).json({ error: 'Admin role required' });
+    }
+
+    const studentId = req.params.studentId; // UUID string
+
+    if (!studentId) {
+      return res.status(400).json({ error: 'Student id is required' });
+    }
+
+    const {
+      item_type,
+      title,
+      body,
+      drive_link_url,
+      due_date,
+      visible_to_student,
+    } = req.body || {};
+
+    const allowedTypes = ['task', 'note', 'resource'];
+
+    if (!allowedTypes.includes(item_type)) {
+      return res.status(400).json({
+        error: 'item_type must be one of: task | note | resource',
+      });
+    }
+
+    if (!title || typeof title !== 'string' || !title.trim()) {
+      return res.status(400).json({ error: 'Title is required' });
+    }
+
+    const insertPayload = {
+      student_id: studentId,
+      item_type,
+      title: title.trim(),
+      body: body && typeof body === 'string' ? body.trim() : null,
+      drive_link_url:
+        drive_link_url && typeof drive_link_url === 'string'
+          ? drive_link_url.trim()
+          : null,
+      due_date: due_date || null, // expect 'YYYY-MM-DD' or null
+      visible_to_student: !!visible_to_student,
+      created_by_admin: true,
+    };
+
+    const { data, error } = await supabase
+      .from('diploma_student_items')
+      .insert(insertPayload)
+      .select('*')
+      .single();
+
+    if (error) {
+      console.error('Error creating admin student item', error);
+      return res
+        .status(500)
+        .json({ error: 'Failed to create student item' });
+    }
+
+    res.status(201).json(data);
+  }
+);
+
+// --------------------------------------------------
+//  ADMIN – ANNOUNCEMENTS
+// --------------------------------------------------
 
 // GET /api/diploma/admin/announcements
 app.get(
@@ -336,8 +450,14 @@ app.post(
       return res.status(403).json({ error: 'Admin role required' });
     }
 
-    const { title, body, drive_link_url, audience, starts_at, ends_at } =
-      req.body || {};
+    const {
+      title,
+      body,
+      drive_link_url,
+      audience,
+      starts_at,
+      ends_at,
+    } = req.body || {};
 
     if (!title) {
       return res.status(400).json({ error: 'Title is required' });
@@ -375,6 +495,7 @@ app.post(
     }
   }
 );
+
 // DEBUG: test Supabase connectivity
 app.get('/api/debug/test-supabase', async (req, res) => {
   try {
@@ -394,7 +515,6 @@ app.get('/api/debug/test-supabase', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
 
 // --------------------------------------------------
 //  START SERVER
