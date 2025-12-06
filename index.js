@@ -30,14 +30,36 @@ app.use(
 ); */}
 
 // ---------- CORS ----------
-// TEMP: allow all origins while we sort out domains
+// TEMP: allow all origins while we sort out domains  
+{/*
 app.use(
   cors({
     origin: true, // reflect request origin, effectively allowing all
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Authorization', 'Content-Type'],
   })
+); 
+*/}
+
+// ---------- CORS ----------
+// TEMP: very permissive CORS while we debug front-end calls.
+app.use(
+  cors({
+    origin: true, // reflect the request origin
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: [
+      'Authorization',
+      'Content-Type',
+      'Accept',
+      'X-Requested-With',
+    ],
+    optionsSuccessStatus: 200,
+  })
 );
+
+// Explicitly handle preflight for all routes
+app.options('*', cors());
+
 
 
 app.use(express.json());
