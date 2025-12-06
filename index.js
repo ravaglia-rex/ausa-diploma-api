@@ -171,6 +171,123 @@ app.get('/api/diploma/announcements', authenticateJwt, async (req, res) => {
   res.json(data);
 });
 
+
+// --------------------------------------------------
+//  ADMIN – UPDATE / DELETE INDIVIDUAL ITEMS (Phase 1.3)
+// --------------------------------------------------
+
+// PATCH /api/diploma/admin/items/:itemId
+app.patch(
+  '/api/diploma/admin/items/:itemId',
+  authenticateJwt,
+  async (req, res) => {
+    if (!isAdmin(req.user)) {
+      return res.status(403).json({ error: 'Admin role required' });
+    }
+
+    const itemId = req.params.itemId; // UUID string
+
+    if (!itemId) {
+      return res.status(400).json({ error: 'Item id is required' });
+    }
+
+    const {
+      title,
+      body,
+      drive_link_url,
+      due_date,
+      visible_to_student,
+      item_type,
+    } = req.body || {};
+
+    const update = {};
+
+    if (title !== undefined) update.title = title;
+    if (body !== undefined) update.body = body;
+    if (drive_link_url !== undefined)
+      update.drive_link_url = drive_link_url || null;
+    if (due_date !== undefined) update.due_date = due_date || null;
+    if (visible_to_student !== undefined)
+      update.visible_to_student = !!visible_to_student;
+
+    if (item_type !== undefined) {
+      const allowedTypes = ['task', 'note', 'resource'];
+      if (!allowedTypes.includes(item_type)) {
+        return res.status(400).json({
+          error: 'item_type must be one of: task | note | resource',
+        });
+      }
+      update.item_type = item_type;
+    }
+
+    if (Object.keys(update).length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+
+    try {
+      const { data, error } = await supabase
+        .from('diploma_student_items')
+        .update(update)
+        .eq('id', itemId)
+        .select('*')
+        .single();
+
+      if (error) {
+        console.error('Error updating admin student item', error);
+        return res
+          .status(500)
+          .json({ error: 'Failed to update student item' });
+      }
+
+      return res.json(data);
+    } catch (err) {
+      console.error('Unexpected error updating student item', err);
+      return res.status(500).json({
+        error: 'Unexpected server error updating student item',
+      });
+    }
+  }
+);
+
+// DELETE /api/diploma/admin/items/:itemId
+app.delete(
+  '/api/diploma/admin/items/:itemId',
+  authenticateJwt,
+  async (req, res) => {
+    if (!isAdmin(req.user)) {
+      return res.status(403).json({ error: 'Admin role required' });
+    }
+
+    const itemId = req.params.itemId; // UUID string
+
+    if (!itemId) {
+      return res.status(400).json({ error: 'Item id is required' });
+    }
+
+    try {
+      const { error } = await supabase
+        .from('diploma_student_items')
+        .delete()
+        .eq('id', itemId);
+
+      if (error) {
+        console.error('Error deleting admin student item', error);
+        return res
+          .status(500)
+          .json({ error: 'Failed to delete student item' });
+      }
+
+      return res.status(204).send();
+    } catch (err) {
+      console.error('Unexpected error deleting student item', err);
+      return res.status(500).json({
+        error: 'Unexpected server error deleting student item',
+      });
+    }
+  }
+);
+
+
 // --------------------------------------------------
 //  LEGACY ADMIN STUDENTS LIST (OPTIONAL)
 // --------------------------------------------------
