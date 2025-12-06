@@ -6,63 +6,31 @@ const jwksRsa = require('jwks-rsa');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
-app.set('etag', false); // 👈 disable 304/ETag for API responses
-
-{/* // ---------- CORS ----------
-const allowedOrigins = [
-  'https://ausa.io',
-  'https://www.ausa.io',
-  'http://localhost:5173', // for local dev
-];
-
-app.use(
-  cors({
-    origin(origin, callback) {
-      // Allow requests with no origin (e.g. curl, Postman) and whitelisted origins
-      if (!origin || allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
-      return callback(new Error('Not allowed by CORS'));
-    },
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Authorization', 'Content-Type'],
-  })
-); */}
+app.set('etag', false); // disable 304/ETag for API responses
 
 // ---------- CORS ----------
-// TEMP: allow all origins while we sort out domains  
-{/*
-app.use(
-  cors({
-    origin: true, // reflect request origin, effectively allowing all
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Authorization', 'Content-Type'],
-  })
-); 
-*/}
+// Very permissive CORS while we debug front-end calls.
+// (We can tighten this later to specific origins.)
+const corsOptions = {
+  origin: true,       // reflect request origin
+  credentials: true,  // allow cookies / auth headers
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: [
+    'Authorization',
+    'Content-Type',
+    'Accept',
+    'X-Requested-With',
+  ],
+  optionsSuccessStatus: 200,
+};
 
-// ---------- CORS ----------
-// ---------- CORS ----------
-// TEMP: very permissive CORS while we debug front-end calls.
-app.use(
-  cors({
-    origin: true,       // reflect the request origin
-    credentials: true,  // allow cookies / auth headers if fetch uses credentials: 'include'
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: [
-      'Authorization',
-      'Content-Type',
-      'Accept',
-      'X-Requested-With',
-    ],
-    optionsSuccessStatus: 200,
-  })
-);
+app.use(cors(corsOptions));
 
-
-
+// Explicitly handle preflight for all /api/* routes
+app.options('/api/*', cors(corsOptions));
 
 app.use(express.json());
+
 
 // ---------- Supabase client (service role) ----------
 const supabase = createClient(
