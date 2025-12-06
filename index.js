@@ -42,10 +42,12 @@ app.use(
 */}
 
 // ---------- CORS ----------
+// ---------- CORS ----------
 // TEMP: very permissive CORS while we debug front-end calls.
 app.use(
   cors({
-    origin: true, // reflect the request origin
+    origin: true,       // reflect the request origin
+    credentials: true,  // allow cookies / auth headers if fetch uses credentials: 'include'
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: [
       'Authorization',
