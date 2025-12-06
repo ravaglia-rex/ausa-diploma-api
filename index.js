@@ -633,6 +633,34 @@ app.get('/api/debug/test-supabase', async (req, res) => {
   }
 });
 
+
+// Simple health check
+app.get('/', (req, res) => {
+  res.json({ ok: true, message: 'Diploma API root is alive' });
+});
+
+// Existing debug route is fine too:
+app.get('/api/debug/test-supabase', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('diploma_students')
+      .select('id')
+      .limit(1);
+
+    if (error) {
+      console.error('Supabase test error', error);
+      return res.status(500).json({ error });
+    }
+
+    res.json({ ok: true, sample: data });
+  } catch (err) {
+    console.error('Supabase test exception', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+
 // --------------------------------------------------
 //  START SERVER
 // --------------------------------------------------
