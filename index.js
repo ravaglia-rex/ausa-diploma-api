@@ -611,6 +611,7 @@ app.options(
   cors(corsOptions)
 );
 
+{/*}
 // GET /api/diploma/admin/announcements
 app.get(
   '/api/diploma/admin/announcements',
@@ -634,6 +635,21 @@ app.get(
     res.json(data || []);
   }
 );
+*/}
+
+// TEMP DEBUG: very simple handler
+app.get('/api/diploma/admin/announcements', (req, res) => {
+  console.log('*** HIT /api/diploma/admin/announcements ***', {
+    auth: !!req.headers.authorization,
+    origin: req.headers.origin,
+  });
+  res.json({
+    ok: true,
+    route: '/api/diploma/admin/announcements',
+    timestamp: new Date().toISOString(),
+  });
+});
+
 
 // POST /api/diploma/admin/announcements
 app.post(
