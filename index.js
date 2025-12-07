@@ -601,8 +601,44 @@ app.get(
 );
 
 // POST /api/diploma/admin/announcements
+// --------------------------------------------------
+//  ADMIN – ANNOUNCEMENTS
+// --------------------------------------------------
+
+// Preflight handler specifically for this route
+app.options(
+  '/api/diploma/admin/announcements',
+  cors(corsOptions)
+);
+
+// GET /api/diploma/admin/announcements
+app.get(
+  '/api/diploma/admin/announcements',
+  cors(corsOptions),          // 👈 route-level CORS
+  authenticateJwt,
+  async (req, res) => {
+    if (!isAdmin(req.user)) {
+      return res.status(403).json({ error: 'Admin role required' });
+    }
+
+    const { data, error } = await supabase
+      .from('diploma_announcements')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Error fetching admin announcements', error);
+      return res.status(500).json({ error: 'Failed to fetch announcements' });
+    }
+
+    res.json(data || []);
+  }
+);
+
+// POST /api/diploma/admin/announcements
 app.post(
   '/api/diploma/admin/announcements',
+  cors(corsOptions),          // 👈 route-level CORS
   authenticateJwt,
   async (req, res) => {
     if (!isAdmin(req.user)) {
@@ -625,35 +661,29 @@ app.post(
     const nowIso = new Date().toISOString();
 
     const insert = {
-      title,
-      body: body || '',
-      drive_link_url: drive_link_url || null,
+      title: title.trim(),
+      body: body?.trim() || '',
+      drive_link_url: drive_link_url?.trim() || null,
       audience: audience || 'all_diploma',
       starts_at: starts_at || nowIso,
       ends_at: ends_at || null,
     };
 
-    try {
-      const { data, error } = await supabase
-        .from('diploma_announcements')
-        .insert(insert)
-        .select('*')
-        .single();
+    const { data, error } = await supabase
+      .from('diploma_announcements')
+      .insert(insert)
+      .select('*')
+      .single();
 
-      if (error) {
-        console.error('Error creating admin announcement', error);
-        return res.status(500).json({ error: 'Failed to create announcement' });
-      }
-
-      return res.status(201).json(data);
-    } catch (err) {
-      console.error('Unexpected error creating announcement', err);
-      return res
-        .status(500)
-        .json({ error: 'Unexpected server error creating announcement' });
+    if (error) {
+      console.error('Error creating admin announcement', error);
+      return res.status(500).json({ error: 'Failed to create announcement' });
     }
+
+    res.status(201).json(data);
   }
 );
+
 
 // DEBUG: test Supabase connectivity
 app.get('/api/debug/test-supabase', async (req, res) => {
