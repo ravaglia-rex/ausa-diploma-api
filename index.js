@@ -11,9 +11,44 @@ app.set('etag', false); // disable 304/ETag for API responses
 // ---------- CORS ----------
 // Very permissive CORS while we debug front-end calls.
 // (We can tighten this later to specific origins.)
+//const corsOptions = {
+//  origin: true,       // reflect request origin
+//  credentials: true,  // allow cookies / auth headers
+//  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+//  allowedHeaders: [
+//    'Authorization',
+//    'Content-Type',
+//    'Accept',
+//    'X-Requested-With',
+//  ],
+//  optionsSuccessStatus: 200,
+//};
+//
+//app.use(cors(corsOptions));
+//
+//
+//app.use(express.json());
+
+// ---------- CORS ----------
+const allowedOrigins = [
+  'https://ausa.io',
+  'https://www.ausa.io',
+  'http://localhost:5173',
+];
+
 const corsOptions = {
-  origin: true,       // reflect request origin
-  credentials: true,  // allow cookies / auth headers
+  origin: function (origin, callback) {
+    // Allow tools like curl/Postman with no Origin
+    if (!origin) return callback(null, true);
+
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    console.warn('[CORS] Blocked origin:', origin);
+    return callback(new Error('Not allowed by CORS'), false);
+  },
+  credentials: true, // OK even if the browser doesn't send cookies
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: [
     'Authorization',
@@ -24,8 +59,16 @@ const corsOptions = {
   optionsSuccessStatus: 200,
 };
 
+// Apply CORS first
 app.use(cors(corsOptions));
 
+// Log incoming requests so we can see Origin and path
+app.use((req, res, next) => {
+  console.log(
+    `[DEBUG] ${req.method} ${req.path} Origin: ${req.headers.origin || 'none'}`
+  );
+  next();
+});
 
 app.use(express.json());
 
