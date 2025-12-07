@@ -25,7 +25,10 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.options('/(.*)', cors(corsOptions));
+// 🔧 Handle preflight OPTIONS for ALL paths using a RegExp,
+// so we don't go through path-to-regexp's string parser.
+app.options(/.*/, cors(corsOptions));
+
 app.use(express.json());
 
 
