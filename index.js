@@ -8,29 +8,9 @@ const { createClient } = require('@supabase/supabase-js');
 const app = express();
 app.set('etag', false); // disable 304/ETag for API responses
 
-// ---------- CORS ----------
-// Very permissive CORS while we debug front-end calls.
-// (We can tighten this later to specific origins.)
-//const corsOptions = {
-//  origin: true,       // reflect request origin
-//  credentials: true,  // allow cookies / auth headers
-//  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-//  allowedHeaders: [
-//    'Authorization',
-//    'Content-Type',
-//    'Accept',
-//    'X-Requested-With',
-//  ],
-//  optionsSuccessStatus: 200,
-//};
-//
-//app.use(cors(corsOptions));
-//
-//
-//app.use(express.json());
 
 // ---------- CORS ----------
-const allowedOrigins = [
+{/*const allowedOrigins = [
   'https://ausa.io',
   'https://www.ausa.io',
   'http://localhost:5173',
@@ -70,7 +50,26 @@ app.use((req, res, next) => {
   next();
 });
 
+app.use(express.json());*/}
+
+
+const corsOptions = {
+  origin: ['https://ausa.io', 'http://localhost:5173'],
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: [
+    'Authorization',
+    'Content-Type',
+    'Accept',
+    'X-Requested-With',
+  ],
+  optionsSuccessStatus: 200,
+};
+
+app.use(cors(corsOptions));
 app.use(express.json());
+
+
 
 
 // ---------- Supabase client (service role) ----------
@@ -606,10 +605,10 @@ app.get(
 // --------------------------------------------------
 
 // Preflight handler specifically for this route
-app.options(
-  '/api/diploma/admin/announcements',
-  cors(corsOptions)
-);
+//app.options(
+//  '/api/diploma/admin/announcements',
+//  cors(corsOptions)
+//);
 
 {/*}
 // GET /api/diploma/admin/announcements
@@ -638,6 +637,7 @@ app.get(
 */}
 
 // TEMP DEBUG: very simple handler
+{/*}
 app.get('/api/diploma/admin/announcements', (req, res) => {
   console.log('*** HIT /api/diploma/admin/announcements ***', {
     auth: !!req.headers.authorization,
@@ -648,7 +648,7 @@ app.get('/api/diploma/admin/announcements', (req, res) => {
     route: '/api/diploma/admin/announcements',
     timestamp: new Date().toISOString(),
   });
-});
+}); */}
 
 
 // POST /api/diploma/admin/announcements
