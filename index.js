@@ -701,6 +701,18 @@ app.post(
 );
 
 
+// Simple liveness check — does not touch Supabase
+app.get('/api/health', (req, res) => {
+  res.json({
+    ok: true,
+    uptime: process.uptime(),
+    version: process.env.RENDER_GIT_COMMIT || process.env.npm_package_version || 'unknown',
+    timestamp: new Date().toISOString(),
+  });
+});
+
+
+
 // DEBUG: test Supabase connectivity
 app.get('/api/debug/test-supabase', async (req, res) => {
   try {
