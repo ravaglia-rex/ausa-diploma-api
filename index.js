@@ -281,11 +281,11 @@ app.delete('/api/diploma/admin/items/:itemId', authenticateJwt, requireAdmin, as
 //  ADMIN ROUTES (for /diploma/admin UI)
 // --------------------------------------------------
 
-// Step 1.2: GET /api/diploma/admin/students (paginated + sortable + filterable)
-// Back-compat: if caller does NOT provide paging/sort/filter params, we return an array (old behavior).
+// Step 2.3: GET /api/diploma/admin/students now merges rollups:
+// items_count, overdue_count, last_activity_at
 app.get('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (req, res) => {
   try {
-    const q = String(req.query.q || req.query.query || '').trim(); // accept both q and legacy query
+    const q = String(req.query.q || req.query.query || '').trim();
     const cohort = String(req.query.cohort || '').trim();
 
     const wantsMeta =
@@ -298,23 +298,24 @@ app.get('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (req
       req.query.missing_auth0_sub !== undefined ||
       req.query.has_overdue !== undefined;
 
-
     const page = Math.max(1, Number(req.query.page || 1));
     const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize || 25)));
     const from = (page - 1) * pageSize;
     const to = from + pageSize - 1;
 
-    const sortAllow = new Set(['full_name', 'email', 'cohort', 'created_at', 'updated_at']);
     const requestedSort = String(req.query.sort || '');
-    const sort = sortAllow.has(requestedSort) ? requestedSort : 'full_name';
-
     const dir = req.query.dir === 'desc' ? 'desc' : 'asc';
 
     const hasBinder = req.query.has_binder === '1' || req.query.has_binder === 'true';
     const missingBinder = req.query.missing_binder === '1' || req.query.missing_binder === 'true';
     const missingAuth0 = req.query.missing_auth0_sub === '1' || req.query.missing_auth0_sub === 'true';
+    const hasOverdue = req.query.has_overdue === '1' || req.query.has_overdue === 'true';
 
-    // NOTE: include updated_at if your table has it; harmless if present.
+    // NOTE: "rollup sorts" are handled after merge (in JS),
+    // because they're derived fields.
+    const dbSortAllow = new Set(['full_name', 'email', 'cohort', 'created_at', 'updated_at']);
+    const dbSort = dbSortAllow.has(requestedSort) ? requestedSort : 'full_name';
+
     let sb = supabase
       .from('diploma_students')
       .select(
@@ -336,7 +337,6 @@ app.get('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (req
     }
 
     if (missingBinder) {
-      // missing = null OR empty string
       sb = sb.or('drive_binder_url.is.null,drive_binder_url.eq.');
     }
 
@@ -344,26 +344,81 @@ app.get('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (req
       sb = sb.or('auth0_sub.is.null,auth0_sub.eq.');
     }
 
-    sb = sb.order(sort, { ascending: dir === 'asc' });
-
-    // If "wantsMeta" is true, apply range pagination and return rows+total.
+    // If caller is using meta mode, apply pagination
     if (wantsMeta) {
-      const { data, error, count } = await sb.range(from, to);
+      sb = sb.order(dbSort, { ascending: dir === 'asc' }).range(from, to);
 
+      const { data: rows, error, count } = await sb;
       if (error) {
         console.error('Error fetching admin students (paged)', { requestId: req.requestId, error: error.message });
         return sendError(res, 500, 'SUPABASE_ERROR', 'Failed to fetch students');
       }
 
+      const safeRows = Array.isArray(rows) ? rows : [];
+
+      // Merge rollups
+      let merged = safeRows;
+      try {
+        const ids = safeRows.map((r) => r.id).filter(Boolean);
+
+        if (ids.length > 0) {
+          const { data: rollups, error: rollupError } = await supabase.rpc('admin_student_rollup', {
+            student_ids: ids,
+          });
+
+          if (rollupError) {
+            console.error('Rollup RPC error', { requestId: req.requestId, error: rollupError.message });
+          } else {
+            const map = new Map((rollups || []).map((r) => [r.student_id, r]));
+            merged = safeRows.map((s) => ({
+              ...s,
+              ...(map.get(s.id) || {
+                items_count: 0,
+                overdue_count: 0,
+                last_activity_at: null,
+              }),
+            }));
+          }
+        }
+      } catch (e) {
+        console.error('Rollup merge exception', { requestId: req.requestId, message: e?.message });
+      }
+
+      // Apply has_overdue filter (post-merge)
+      if (hasOverdue) {
+        merged = merged.filter((s) => Number(s.overdue_count || 0) > 0);
+      }
+
+      // Support sorting by derived fields (post-merge)
+      const derivedSortAllow = new Set(['items_count', 'overdue_count', 'last_activity_at']);
+      if (derivedSortAllow.has(requestedSort)) {
+        merged = merged.slice().sort((a, b) => {
+          const av = a?.[requestedSort];
+          const bv = b?.[requestedSort];
+
+          // last_activity_at is a timestamp string
+          if (requestedSort === 'last_activity_at') {
+            const ad = av ? new Date(av).getTime() : 0;
+            const bd = bv ? new Date(bv).getTime() : 0;
+            return dir === 'asc' ? ad - bd : bd - ad;
+          }
+
+          // counts numeric
+          const an = Number(av || 0);
+          const bn = Number(bv || 0);
+          return dir === 'asc' ? an - bn : bn - an;
+        });
+      }
+
       return res.json({
-        rows: data || [],
+        rows: merged,
         total: count || 0,
         page,
         pageSize,
       });
     }
 
-    // Back-compat: old behavior returns array
+    // Legacy mode (array)
     const { data, error } = await sb.order('full_name', { ascending: true });
     if (error) {
       console.error('Error fetching admin students (legacy)', { requestId: req.requestId, error: error.message });
@@ -376,6 +431,7 @@ app.get('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (req
     return sendError(res, 500, 'SERVER_ERROR', 'Server error');
   }
 });
+
 
 // PATCH /api/diploma/admin/students/:id
 app.patch('/api/diploma/admin/students/:id', authenticateJwt, requireAdmin, async (req, res) => {
