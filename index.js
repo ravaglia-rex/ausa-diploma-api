@@ -22,6 +22,7 @@ const corsOptions = {
     'X-Requested-With',
     'X-Request-Id', // 👈 Step 1.1: allow request id header from browser
   ],
+  exposedHeaders: ['X-Request-Id'], // 👈 required so the browser can READ it
   optionsSuccessStatus: 200,
 };
 
@@ -294,7 +295,9 @@ app.get('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (req
       req.query.dir !== undefined ||
       req.query.has_binder !== undefined ||
       req.query.missing_binder !== undefined ||
-      req.query.missing_auth0_sub !== undefined;
+      req.query.missing_auth0_sub !== undefined ||
+      req.query.has_overdue !== undefined;
+
 
     const page = Math.max(1, Number(req.query.page || 1));
     const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize || 25)));
@@ -302,7 +305,9 @@ app.get('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (req
     const to = from + pageSize - 1;
 
     const sortAllow = new Set(['full_name', 'email', 'cohort', 'created_at', 'updated_at']);
-    const sort = sortAllow.has(req.query.sort) ? req.query.sort : 'full_name';
+    const requestedSort = String(req.query.sort || '');
+    const sort = sortAllow.has(requestedSort) ? requestedSort : 'full_name';
+
     const dir = req.query.dir === 'desc' ? 'desc' : 'asc';
 
     const hasBinder = req.query.has_binder === '1' || req.query.has_binder === 'true';
@@ -511,8 +516,8 @@ app.get('/api/diploma/admin/announcements', authenticateJwt, requireAdmin, async
   return res.json(data || []);
 });
 
-// POST /api/diploma/admin/announcements
-app.post('/api/diploma/admin/announcements', cors(corsOptions), authenticateJwt, requireAdmin, async (req, res) => {
+// POST /api/diploma/admin/announcements-app.post('/api/diploma/admin/announcements', cors(corsOptions), authenticateJwt, requireAdmin, async (req, res) => {
+app.post('/api/diploma/admin/announcements', authenticateJwt, requireAdmin, async (req, res) => {
   const { title, body, drive_link_url, audience, starts_at, ends_at } = req.body || {};
 
   if (!title) {
