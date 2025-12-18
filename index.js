@@ -7,6 +7,8 @@ const jwksRsa = require('jwks-rsa');
 const { createClient } = require('@supabase/supabase-js');
 const { randomUUID } = require('crypto');
 
+const { sendWelcomeToDiplomaPortal } = require('./email/sendWelcomeEmail');
+
 const app = express();
 app.set('etag', false); // disable 304/ETag for API responses
 
@@ -20,16 +22,16 @@ const corsOptions = {
     'Content-Type',
     'Accept',
     'X-Requested-With',
-    'X-Request-Id', // 👈 Step 1.1: allow request id header from browser
+    'X-Request-Id',
   ],
-  exposedHeaders: ['X-Request-Id'], // 👈 required so the browser can READ it
+  exposedHeaders: ['X-Request-Id'],
   optionsSuccessStatus: 200,
 };
 
 app.use(cors(corsOptions));
 app.use(express.json());
 
-// ---------- Step 1.1: Request ID middleware ----------
+// ---------- Request ID middleware ----------
 app.use((req, res, next) => {
   const incoming = req.get('X-Request-Id');
   const requestId = incoming || randomUUID();
@@ -44,7 +46,7 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// ---------- Response helper (Step 1.3: standardized errors) ----------
+// ---------- Response helper ----------
 function sendError(res, status, code, message, extra = {}) {
   const requestId = res.getHeader('X-Request-Id');
   return res.status(status).json({
@@ -60,12 +62,17 @@ function sendError(res, status, code, message, extra = {}) {
 // ---------- Auth0 JWT verification ----------
 const jwksClient = jwksRsa({
   jwksUri: `https://${process.env.AUTH0_DOMAIN}/.well-known/jwks.json`,
+  cache: true,
+  rateLimit: true,
+  jwksRequestsPerMinute: 10,
 });
 
 function getKey(header, callback) {
   jwksClient.getSigningKey(header.kid, function (err, key) {
-    const signingKey = key.getPublicKey();
-    callback(err, signingKey);
+    if (err) return callback(err);
+    if (!key) return callback(new Error('Signing key not found'));
+    const signingKey = typeof key.getPublicKey === 'function' ? key.getPublicKey() : key.publicKey || key.rsaPublicKey;
+    callback(null, signingKey);
   });
 }
 
@@ -93,15 +100,14 @@ function authenticateJwt(req, res, next) {
       return sendError(res, 401, 'INVALID_TOKEN', 'Invalid token');
     }
 
-    req.user = decoded; // contains sub, custom claims, etc.
+    req.user = decoded;
     next();
   });
 }
 
 // ---------- Helper: admin role check ----------
 function isAdmin(user) {
-  const roles =
-    user?.['https://ausa.io/claims/roles'] || user?.roles || [];
+  const roles = user?.['https://ausa.io/claims/roles'] || user?.roles || [];
   return Array.isArray(roles) && roles.includes('ausa_admin');
 }
 
@@ -169,6 +175,91 @@ app.get('/api/diploma/me/items', authenticateJwt, async (req, res) => {
   return res.json(items || []);
 });
 
+// POST /api/diploma/me/link-auth0
+// Links auth0_sub by matching the authenticated user's email -> student record.
+// NOTE: This is safest if email is present in the access token via an Auth0 Action.
+// If email claim is missing, we fall back to req.body.email (works, but less secure).
+app.post('/api/diploma/me/link-auth0', authenticateJwt, async (req, res) => {
+  try {
+    const tokenPayload = req.user || {};
+    const sub = tokenPayload.sub;
+
+    if (!sub) return sendError(res, 401, 'MISSING_SUB', 'Missing sub in token');
+
+    const tokenEmail =
+      tokenPayload.email ||
+      tokenPayload['https://ausa.io/email'] ||
+      tokenPayload['https://ausa.io/claims/email'] ||
+      null;
+
+    const bodyEmail = req.body?.email ? String(req.body.email).trim().toLowerCase() : null;
+    const email = (tokenEmail || bodyEmail || '').trim().toLowerCase();
+
+    if (!email) {
+      return sendError(
+        res,
+        400,
+        'MISSING_EMAIL',
+        'Email required to link account (provide email claim in token or send { email } in request body).'
+      );
+    }
+
+    // If already linked, return success
+    const { data: already, error: alreadyErr } = await supabase
+      .from('diploma_students')
+      .select('id, email, auth0_sub')
+      .eq('auth0_sub', sub)
+      .maybeSingle();
+
+    if (alreadyErr) {
+      console.error('Error checking existing sub link', { requestId: req.requestId, error: alreadyErr.message });
+      return sendError(res, 500, 'SUPABASE_ERROR', 'Failed to check existing link');
+    }
+
+    if (already?.id) {
+      return res.json({ ok: true, linked: true, already: true, student: already });
+    }
+
+    // Find student by email
+    const { data: student, error: findErr } = await supabase
+      .from('diploma_students')
+      .select('id, email, auth0_sub')
+      .ilike('email', email)
+      .maybeSingle();
+
+    if (findErr) {
+      console.error('Error finding student for link-auth0', { requestId: req.requestId, error: findErr.message });
+      return sendError(res, 500, 'SUPABASE_ERROR', 'Failed to find student');
+    }
+
+    if (!student) {
+      return sendError(res, 404, 'NOT_FOUND', 'No student record matches this email');
+    }
+
+    if (student.auth0_sub) {
+      if (student.auth0_sub === sub) return res.json({ ok: true, linked: true, already: true, student });
+      return sendError(res, 409, 'ALREADY_LINKED', 'Student record is already linked to a different Auth0 user.');
+    }
+
+    const { data: updated, error: updErr } = await supabase
+      .from('diploma_students')
+      .update({ auth0_sub: sub })
+      .eq('id', student.id)
+      .select('id, email, auth0_sub')
+      .single();
+
+    if (updErr) {
+      console.error('Error updating student auth0_sub', { requestId: req.requestId, error: updErr.message });
+      return sendError(res, 500, 'SUPABASE_ERROR', 'Failed to link Auth0 sub');
+    }
+
+    return res.json({ ok: true, linked: true, student: updated });
+  } catch (e) {
+    console.error('link-auth0 exception', { requestId: req.requestId, message: e?.message });
+    return sendError(res, 500, 'SERVER_ERROR', 'Link failed');
+  }
+});
+
 // GET /api/diploma/announcements
 app.get('/api/diploma/announcements', authenticateJwt, async (req, res) => {
   const auth0Sub = req.user.sub;
@@ -185,7 +276,7 @@ app.get('/api/diploma/announcements', authenticateJwt, async (req, res) => {
     .from('diploma_announcements')
     .select('*')
     .lte('starts_at', now)
-    .or('ends_at.is.null,ends_at.gt.' + now);
+    .or(`ends_at.is.null,ends_at.gt.${now}`);
 
   if (student?.cohort) {
     query = query.in('audience', ['all_diploma', `cohort_${student.cohort}`]);
@@ -193,15 +284,10 @@ app.get('/api/diploma/announcements', authenticateJwt, async (req, res) => {
     query = query.eq('audience', 'all_diploma');
   }
 
-  const { data, error } = await query.order('created_at', {
-    ascending: false,
-  });
+  const { data, error } = await query.order('created_at', { ascending: false });
 
   if (error) {
-    console.error('Error fetching announcements', {
-      requestId: req.requestId,
-      error: error.message,
-    });
+    console.error('Error fetching announcements', { requestId: req.requestId, error: error.message });
     return sendError(res, 500, 'SUPABASE_ERROR', 'Failed to fetch announcements');
   }
 
@@ -216,20 +302,9 @@ app.get('/api/diploma/announcements', authenticateJwt, async (req, res) => {
 app.patch('/api/diploma/admin/items/:itemId', authenticateJwt, requireAdmin, async (req, res) => {
   const itemId = req.params.itemId;
 
-  if (!itemId) {
-    return sendError(res, 400, 'BAD_REQUEST', 'Item id is required');
-  }
+  if (!itemId) return sendError(res, 400, 'BAD_REQUEST', 'Item id is required');
 
-  const {
-    title,
-    body,
-    drive_link_url,
-    due_date,
-    visible_to_student,
-    item_type,
-    status,
-  } = req.body || {};
-
+  const { title, body, drive_link_url, due_date, visible_to_student, item_type, status } = req.body || {};
   const update = {};
 
   if (title !== undefined) update.title = title;
@@ -252,7 +327,6 @@ app.patch('/api/diploma/admin/items/:itemId', authenticateJwt, requireAdmin, asy
       return sendError(res, 400, 'BAD_REQUEST', 'status must be one of: open | done');
     }
     update.status = status;
-    // completed_at is handled by DB trigger, so we do not set it here.
   }
 
   if (Object.keys(update).length === 0) {
@@ -267,24 +341,17 @@ app.patch('/api/diploma/admin/items/:itemId', authenticateJwt, requireAdmin, asy
     .single();
 
   if (error) {
-    console.error('Error updating admin student item', {
-      requestId: req.requestId,
-      error: error.message,
-    });
+    console.error('Error updating admin student item', { requestId: req.requestId, error: error.message });
     return sendError(res, 500, 'SUPABASE_ERROR', 'Failed to update student item');
   }
 
   return res.json(data);
 });
 
-
 // DELETE /api/diploma/admin/items/:itemId
 app.delete('/api/diploma/admin/items/:itemId', authenticateJwt, requireAdmin, async (req, res) => {
   const itemId = req.params.itemId;
-
-  if (!itemId) {
-    return sendError(res, 400, 'BAD_REQUEST', 'Item id is required');
-  }
+  if (!itemId) return sendError(res, 400, 'BAD_REQUEST', 'Item id is required');
 
   const { error } = await supabase
     .from('diploma_student_items')
@@ -299,8 +366,10 @@ app.delete('/api/diploma/admin/items/:itemId', authenticateJwt, requireAdmin, as
   return res.status(204).send();
 });
 
-// Step 2.3: GET /api/diploma/admin/students merges rollups:
-// items_count, overdue_count, last_activity_at
+// --------------------------------------------------
+//  ADMIN – STUDENTS LIST
+// --------------------------------------------------
+
 app.get('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (req, res) => {
   try {
     const q = String(req.query.q || req.query.query || '').trim();
@@ -345,23 +414,12 @@ app.get('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (req
       sb = sb.or(`full_name.ilike.${like},email.ilike.${like}`);
     }
 
-    if (cohort) {
-      sb = sb.eq('cohort', cohort);
-    }
+    if (cohort) sb = sb.eq('cohort', cohort);
 
-    if (hasBinder) {
-      sb = sb.not('drive_binder_url', 'is', null).neq('drive_binder_url', '');
-    }
+    if (hasBinder) sb = sb.not('drive_binder_url', 'is', null).neq('drive_binder_url', '');
+    if (missingBinder) sb = sb.or('drive_binder_url.is.null,drive_binder_url.eq.');
+    if (missingAuth0) sb = sb.or('auth0_sub.is.null,auth0_sub.eq.');
 
-    if (missingBinder) {
-      sb = sb.or('drive_binder_url.is.null,drive_binder_url.eq.');
-    }
-
-    if (missingAuth0) {
-      sb = sb.or('auth0_sub.is.null,auth0_sub.eq.');
-    }
-
-    // Legacy mode (array)
     if (!wantsMeta) {
       const { data, error } = await sb.order('full_name', { ascending: true });
       if (error) {
@@ -371,13 +429,8 @@ app.get('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (req
       return res.json(data || []);
     }
 
-    // If request needs derived processing (derived sort/filter), do:
-    // 1) fetch matching students (no range)
-    // 2) merge rollups
-    // 3) filter/sort globally
-    // 4) paginate in JS
     if (needsDerivedProcessing) {
-      const { data: rowsAll, error, count } = await sb.order(dbSort, { ascending: dir === 'asc' });
+      const { data: rowsAll, error } = await sb.order(dbSort, { ascending: dir === 'asc' });
 
       if (error) {
         console.error('Error fetching admin students (derived)', { requestId: req.requestId, error: error.message });
@@ -386,7 +439,6 @@ app.get('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (req
 
       const safeRows = Array.isArray(rowsAll) ? rowsAll : [];
 
-      // Merge rollups
       let merged = safeRows;
       try {
         const ids = safeRows.map((r) => r.id).filter(Boolean);
@@ -402,11 +454,7 @@ app.get('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (req
             const map = new Map((rollups || []).map((r) => [r.student_id, r]));
             merged = safeRows.map((s) => ({
               ...s,
-              ...(map.get(s.id) || {
-                items_count: 0,
-                overdue_count: 0,
-                last_activity_at: null,
-              }),
+              ...(map.get(s.id) || { items_count: 0, overdue_count: 0, last_activity_at: null }),
             }));
           }
         }
@@ -414,15 +462,12 @@ app.get('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (req
         console.error('Rollup merge exception', { requestId: req.requestId, message: e?.message });
       }
 
-      // Apply has_overdue (now affects total correctly)
-      if (hasOverdue) {
-        merged = merged.filter((s) => Number(s.overdue_count || 0) > 0);
-      }
+      if (hasOverdue) merged = merged.filter((s) => Number(s.overdue_count || 0) > 0);
 
-      // Global sort: supports both DB fields and derived fields
-      const sortKey = requestedSort && (dbSortAllow.has(requestedSort) || derivedSortAllow.has(requestedSort))
-        ? requestedSort
-        : 'full_name';
+      const sortKey =
+        requestedSort && (dbSortAllow.has(requestedSort) || derivedSortAllow.has(requestedSort))
+          ? requestedSort
+          : 'full_name';
 
       const asc = dir === 'asc';
 
@@ -430,21 +475,18 @@ app.get('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (req
         const av = a?.[sortKey];
         const bv = b?.[sortKey];
 
-        // dates/timestamps
         if (['created_at', 'updated_at', 'last_activity_at'].includes(sortKey)) {
           const ad = av ? new Date(av).getTime() : 0;
           const bd = bv ? new Date(bv).getTime() : 0;
           return asc ? ad - bd : bd - ad;
         }
 
-        // numeric counts
         if (['items_count', 'overdue_count'].includes(sortKey)) {
           const an = Number(av || 0);
           const bn = Number(bv || 0);
           return asc ? an - bn : bn - an;
         }
 
-        // strings
         const as = String(av || '').toLowerCase();
         const bs = String(bv || '').toLowerCase();
         if (as < bs) return asc ? -1 : 1;
@@ -457,15 +499,9 @@ app.get('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (req
       const end = start + pageSize;
       const pageRows = merged.slice(start, end);
 
-      return res.json({
-        rows: pageRows,
-        total: totalFiltered,
-        page,
-        pageSize,
-      });
+      return res.json({ rows: pageRows, total: totalFiltered, page, pageSize });
     }
 
-    // Standard meta mode (DB-level pagination/sort)
     const from = (page - 1) * pageSize;
     const to = from + pageSize - 1;
 
@@ -478,31 +514,127 @@ app.get('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (req
       return sendError(res, 500, 'SUPABASE_ERROR', 'Failed to fetch students');
     }
 
-    return res.json({
-      rows: rows || [],
-      total: count || 0,
-      page,
-      pageSize,
-    });
+    return res.json({ rows: rows || [], total: count || 0, page, pageSize });
   } catch (e) {
     console.error('admin/students error', { requestId: req.requestId, message: e?.message });
     return sendError(res, 500, 'SERVER_ERROR', 'Server error');
   }
 });
 
+// --------------------------------------------------
+//  ADMIN – CREATE STUDENT (WITH INVITE)
+// --------------------------------------------------
 
+// POST /api/diploma/admin/students
+app.post('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (req, res) => {
+  try {
+    const { full_name, email, cohort, drive_binder_url, drive_folder_url, auth0_sub, send_invite } = req.body || {};
+
+    if (!email || typeof email !== 'string' || !email.trim()) {
+      return sendError(res, 400, 'BAD_REQUEST', 'Email is required');
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanName = typeof full_name === 'string' ? full_name.trim() : '';
+    const cleanCohort = typeof cohort === 'string' ? cohort.trim() : null;
+
+    if (cleanCohort && !/^\d{4}$/.test(cleanCohort)) {
+      return sendError(res, 400, 'BAD_REQUEST', 'Cohort must be a 4-digit year (e.g., 2026)');
+    }
+
+    const { data: existing, error: existingErr } = await supabase
+      .from('diploma_students')
+      .select('id,email')
+      .ilike('email', cleanEmail)
+      .maybeSingle();
+
+    if (existingErr) {
+      console.error('Error checking existing student', { requestId: req.requestId, error: existingErr.message });
+      return sendError(res, 500, 'SUPABASE_ERROR', 'Failed to check existing student');
+    }
+
+    if (existing?.id) {
+      return sendError(res, 409, 'ALREADY_EXISTS', 'A student with this email already exists');
+    }
+
+    const insertPayload = {
+      email: cleanEmail,
+      full_name: cleanName || null,
+      cohort: cleanCohort,
+      drive_binder_url: typeof drive_binder_url === 'string' ? drive_binder_url.trim() : null,
+      drive_folder_url: typeof drive_folder_url === 'string' ? drive_folder_url.trim() : null,
+      auth0_sub: typeof auth0_sub === 'string' && auth0_sub.trim() ? auth0_sub.trim() : null,
+    };
+
+    const { data, error } = await supabase
+      .from('diploma_students')
+      .insert(insertPayload)
+      .select('*')
+      .single();
+
+    if (error) {
+      console.error('Error creating student', { requestId: req.requestId, error: error.message });
+      return sendError(res, 500, 'SUPABASE_ERROR', 'Failed to create student');
+    }
+
+    const shouldSendInvite = send_invite === undefined ? true : !!send_invite;
+
+    let invite = { requested: shouldSendInvite, ok: false, skipped: true };
+
+    if (shouldSendInvite) {
+      try {
+        if (!process.env.RESEND_API_KEY || !process.env.RESEND_FROM) {
+          invite = {
+            requested: true,
+            ok: false,
+            skipped: true,
+            reason: 'Resend not configured (missing RESEND_API_KEY or RESEND_FROM)',
+          };
+        } else {
+          const firstName = (data?.full_name || '').trim().split(/\s+/)[0] || '';
+          const sendResult = await sendWelcomeToDiplomaPortal({ toEmail: data.email, firstName });
+          invite = { requested: true, ok: true, skipped: false, sendResult };
+        }
+      } catch (e) {
+        console.error('Invite send failed (non-fatal)', {
+          requestId: req.requestId,
+          studentId: data?.id,
+          email: data?.email,
+          message: e?.message,
+        });
+        invite = { requested: true, ok: false, skipped: false, error: e?.message || 'Invite send failed' };
+      }
+    }
+
+    return res.status(201).json({ ...data, invite });
+  } catch (e) {
+    console.error('Create student error', { requestId: req.requestId, message: e?.message });
+    return sendError(res, 500, 'SERVER_ERROR', 'Server error');
+  }
+});
+
+// --------------------------------------------------
+//  ADMIN – UPDATE/GET STUDENT
+// --------------------------------------------------
 
 // PATCH /api/diploma/admin/students/:id
+// (Added auth0_sub support for "admin paste-in")
 app.patch('/api/diploma/admin/students/:id', authenticateJwt, requireAdmin, async (req, res) => {
   const id = req.params.id;
-  const { cohort, drive_binder_url, drive_folder_url, full_name, email } = req.body || {};
+  const { cohort, drive_binder_url, drive_folder_url, full_name, email, auth0_sub } = req.body || {};
 
   const update = {};
+
   if (cohort !== undefined) update.cohort = cohort;
   if (drive_binder_url !== undefined) update.drive_binder_url = drive_binder_url;
   if (drive_folder_url !== undefined) update.drive_folder_url = drive_folder_url;
   if (full_name !== undefined) update.full_name = full_name;
-  if (email !== undefined) update.email = email;
+  if (email !== undefined) update.email = typeof email === 'string' ? email.trim().toLowerCase() : email;
+
+  if (auth0_sub !== undefined) {
+    const v = typeof auth0_sub === 'string' ? auth0_sub.trim() : '';
+    update.auth0_sub = v ? v : null;
+  }
 
   if (Object.keys(update).length === 0) {
     return sendError(res, 400, 'BAD_REQUEST', 'No fields to update');
@@ -541,6 +673,34 @@ app.get('/api/diploma/admin/students/:id', authenticateJwt, requireAdmin, async 
   return res.json(data);
 });
 
+// POST /api/diploma/admin/students/:id/send-invite
+app.post('/api/diploma/admin/students/:id/send-invite', authenticateJwt, requireAdmin, async (req, res) => {
+  try {
+    const studentId = req.params.id;
+
+    const { data: student, error } = await supabase
+      .from('diploma_students')
+      .select('id, full_name, email')
+      .eq('id', studentId)
+      .single();
+
+    if (error || !student) return sendError(res, 404, 'NOT_FOUND', 'Student not found');
+    if (!student.email) return sendError(res, 400, 'BAD_REQUEST', 'Student has no email');
+
+    if (!process.env.RESEND_API_KEY || !process.env.RESEND_FROM) {
+      return sendError(res, 400, 'BAD_REQUEST', 'Resend not configured (missing RESEND_API_KEY or RESEND_FROM)');
+    }
+
+    const firstName = (student.full_name || '').trim().split(/\s+/)[0] || '';
+    const sendResult = await sendWelcomeToDiplomaPortal({ toEmail: student.email, firstName });
+
+    return res.json({ ok: true, sendResult });
+  } catch (e) {
+    console.error('send-invite error', { requestId: req.requestId, message: e?.message });
+    return sendError(res, 500, 'SERVER_ERROR', e?.message || 'Invite send failed');
+  }
+});
+
 // --------------------------------------------------
 //  ADMIN – PER-STUDENT ITEMS
 // --------------------------------------------------
@@ -548,10 +708,7 @@ app.get('/api/diploma/admin/students/:id', authenticateJwt, requireAdmin, async 
 // GET /api/diploma/admin/students/:studentId/items
 app.get('/api/diploma/admin/students/:studentId/items', authenticateJwt, requireAdmin, async (req, res) => {
   const studentId = req.params.studentId;
-
-  if (!studentId) {
-    return sendError(res, 400, 'BAD_REQUEST', 'Student id is required');
-  }
+  if (!studentId) return sendError(res, 400, 'BAD_REQUEST', 'Student id is required');
 
   const { data, error } = await supabase
     .from('diploma_student_items')
@@ -571,10 +728,7 @@ app.get('/api/diploma/admin/students/:studentId/items', authenticateJwt, require
 // POST /api/diploma/admin/students/:studentId/items
 app.post('/api/diploma/admin/students/:studentId/items', authenticateJwt, requireAdmin, async (req, res) => {
   const studentId = req.params.studentId;
-
-  if (!studentId) {
-    return sendError(res, 400, 'BAD_REQUEST', 'Student id is required');
-  }
+  if (!studentId) return sendError(res, 400, 'BAD_REQUEST', 'Student id is required');
 
   const { item_type, title, body, drive_link_url, due_date, visible_to_student } = req.body || {};
   const allowedTypes = ['task', 'note', 'resource'];
@@ -631,7 +785,7 @@ app.get('/api/diploma/admin/announcements', authenticateJwt, requireAdmin, async
   return res.json(data || []);
 });
 
-// POST /api/diploma/admin/announcements-app.post('/api/diploma/admin/announcements', cors(corsOptions), authenticateJwt, requireAdmin, async (req, res) => {
+// POST /api/diploma/admin/announcements
 app.post('/api/diploma/admin/announcements', authenticateJwt, requireAdmin, async (req, res) => {
   const { title, body, drive_link_url, audience, starts_at, ends_at } = req.body || {};
 
@@ -668,7 +822,6 @@ app.post('/api/diploma/admin/announcements', authenticateJwt, requireAdmin, asyn
 //  OBSERVABILITY
 // --------------------------------------------------
 
-// Simple liveness check — does not touch Supabase
 app.get('/api/health', (req, res) => {
   res.json({
     ok: true,
@@ -679,7 +832,6 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Debug endpoint – do not expose in public docs
 app.get('/api/debug/test-supabase', async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -699,7 +851,6 @@ app.get('/api/debug/test-supabase', async (req, res) => {
   }
 });
 
-// Root (simple)
 app.get('/', (req, res) => {
   res.json({ ok: true, requestId: req.requestId, message: 'Diploma API root is alive' });
 });
