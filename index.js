@@ -220,7 +220,16 @@ app.patch('/api/diploma/admin/items/:itemId', authenticateJwt, requireAdmin, asy
     return sendError(res, 400, 'BAD_REQUEST', 'Item id is required');
   }
 
-  const { title, body, drive_link_url, due_date, visible_to_student, item_type } = req.body || {};
+  const {
+    title,
+    body,
+    drive_link_url,
+    due_date,
+    visible_to_student,
+    item_type,
+    status,
+  } = req.body || {};
+
   const update = {};
 
   if (title !== undefined) update.title = title;
@@ -237,6 +246,15 @@ app.patch('/api/diploma/admin/items/:itemId', authenticateJwt, requireAdmin, asy
     update.item_type = item_type;
   }
 
+  if (status !== undefined) {
+    const allowedStatuses = ['open', 'done'];
+    if (!allowedStatuses.includes(status)) {
+      return sendError(res, 400, 'BAD_REQUEST', 'status must be one of: open | done');
+    }
+    update.status = status;
+    // completed_at is handled by DB trigger, so we do not set it here.
+  }
+
   if (Object.keys(update).length === 0) {
     return sendError(res, 400, 'BAD_REQUEST', 'No fields to update');
   }
@@ -249,12 +267,16 @@ app.patch('/api/diploma/admin/items/:itemId', authenticateJwt, requireAdmin, asy
     .single();
 
   if (error) {
-    console.error('Error updating admin student item', { requestId: req.requestId, error: error.message });
+    console.error('Error updating admin student item', {
+      requestId: req.requestId,
+      error: error.message,
+    });
     return sendError(res, 500, 'SUPABASE_ERROR', 'Failed to update student item');
   }
 
   return res.json(data);
 });
+
 
 // DELETE /api/diploma/admin/items/:itemId
 app.delete('/api/diploma/admin/items/:itemId', authenticateJwt, requireAdmin, async (req, res) => {
@@ -277,11 +299,7 @@ app.delete('/api/diploma/admin/items/:itemId', authenticateJwt, requireAdmin, as
   return res.status(204).send();
 });
 
-// --------------------------------------------------
-//  ADMIN ROUTES (for /diploma/admin UI)
-// --------------------------------------------------
-
-// Step 2.3: GET /api/diploma/admin/students now merges rollups:
+// Step 2.3: GET /api/diploma/admin/students merges rollups:
 // items_count, overdue_count, last_activity_at
 app.get('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (req, res) => {
   try {
@@ -300,8 +318,6 @@ app.get('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (req
 
     const page = Math.max(1, Number(req.query.page || 1));
     const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize || 25)));
-    const from = (page - 1) * pageSize;
-    const to = from + pageSize - 1;
 
     const requestedSort = String(req.query.sort || '');
     const dir = req.query.dir === 'desc' ? 'desc' : 'asc';
@@ -311,8 +327,9 @@ app.get('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (req
     const missingAuth0 = req.query.missing_auth0_sub === '1' || req.query.missing_auth0_sub === 'true';
     const hasOverdue = req.query.has_overdue === '1' || req.query.has_overdue === 'true';
 
-    // NOTE: "rollup sorts" are handled after merge (in JS),
-    // because they're derived fields.
+    const derivedSortAllow = new Set(['items_count', 'overdue_count', 'last_activity_at']);
+    const needsDerivedProcessing = hasOverdue || derivedSortAllow.has(requestedSort);
+
     const dbSortAllow = new Set(['full_name', 'email', 'cohort', 'created_at', 'updated_at']);
     const dbSort = dbSortAllow.has(requestedSort) ? requestedSort : 'full_name';
 
@@ -344,17 +361,30 @@ app.get('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (req
       sb = sb.or('auth0_sub.is.null,auth0_sub.eq.');
     }
 
-    // If caller is using meta mode, apply pagination
-    if (wantsMeta) {
-      sb = sb.order(dbSort, { ascending: dir === 'asc' }).range(from, to);
-
-      const { data: rows, error, count } = await sb;
+    // Legacy mode (array)
+    if (!wantsMeta) {
+      const { data, error } = await sb.order('full_name', { ascending: true });
       if (error) {
-        console.error('Error fetching admin students (paged)', { requestId: req.requestId, error: error.message });
+        console.error('Error fetching admin students (legacy)', { requestId: req.requestId, error: error.message });
+        return sendError(res, 500, 'SUPABASE_ERROR', 'Failed to fetch students');
+      }
+      return res.json(data || []);
+    }
+
+    // If request needs derived processing (derived sort/filter), do:
+    // 1) fetch matching students (no range)
+    // 2) merge rollups
+    // 3) filter/sort globally
+    // 4) paginate in JS
+    if (needsDerivedProcessing) {
+      const { data: rowsAll, error, count } = await sb.order(dbSort, { ascending: dir === 'asc' });
+
+      if (error) {
+        console.error('Error fetching admin students (derived)', { requestId: req.requestId, error: error.message });
         return sendError(res, 500, 'SUPABASE_ERROR', 'Failed to fetch students');
       }
 
-      const safeRows = Array.isArray(rows) ? rows : [];
+      const safeRows = Array.isArray(rowsAll) ? rowsAll : [];
 
       // Merge rollups
       let merged = safeRows;
@@ -384,53 +414,82 @@ app.get('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (req
         console.error('Rollup merge exception', { requestId: req.requestId, message: e?.message });
       }
 
-      // Apply has_overdue filter (post-merge)
+      // Apply has_overdue (now affects total correctly)
       if (hasOverdue) {
         merged = merged.filter((s) => Number(s.overdue_count || 0) > 0);
       }
 
-      // Support sorting by derived fields (post-merge)
-      const derivedSortAllow = new Set(['items_count', 'overdue_count', 'last_activity_at']);
-      if (derivedSortAllow.has(requestedSort)) {
-        merged = merged.slice().sort((a, b) => {
-          const av = a?.[requestedSort];
-          const bv = b?.[requestedSort];
+      // Global sort: supports both DB fields and derived fields
+      const sortKey = requestedSort && (dbSortAllow.has(requestedSort) || derivedSortAllow.has(requestedSort))
+        ? requestedSort
+        : 'full_name';
 
-          // last_activity_at is a timestamp string
-          if (requestedSort === 'last_activity_at') {
-            const ad = av ? new Date(av).getTime() : 0;
-            const bd = bv ? new Date(bv).getTime() : 0;
-            return dir === 'asc' ? ad - bd : bd - ad;
-          }
+      const asc = dir === 'asc';
 
-          // counts numeric
+      merged = merged.slice().sort((a, b) => {
+        const av = a?.[sortKey];
+        const bv = b?.[sortKey];
+
+        // dates/timestamps
+        if (['created_at', 'updated_at', 'last_activity_at'].includes(sortKey)) {
+          const ad = av ? new Date(av).getTime() : 0;
+          const bd = bv ? new Date(bv).getTime() : 0;
+          return asc ? ad - bd : bd - ad;
+        }
+
+        // numeric counts
+        if (['items_count', 'overdue_count'].includes(sortKey)) {
           const an = Number(av || 0);
           const bn = Number(bv || 0);
-          return dir === 'asc' ? an - bn : bn - an;
-        });
-      }
+          return asc ? an - bn : bn - an;
+        }
+
+        // strings
+        const as = String(av || '').toLowerCase();
+        const bs = String(bv || '').toLowerCase();
+        if (as < bs) return asc ? -1 : 1;
+        if (as > bs) return asc ? 1 : -1;
+        return 0;
+      });
+
+      const totalFiltered = merged.length;
+      const start = (page - 1) * pageSize;
+      const end = start + pageSize;
+      const pageRows = merged.slice(start, end);
 
       return res.json({
-        rows: merged,
-        total: count || 0,
+        rows: pageRows,
+        total: totalFiltered,
         page,
         pageSize,
       });
     }
 
-    // Legacy mode (array)
-    const { data, error } = await sb.order('full_name', { ascending: true });
+    // Standard meta mode (DB-level pagination/sort)
+    const from = (page - 1) * pageSize;
+    const to = from + pageSize - 1;
+
+    const { data: rows, error, count } = await sb
+      .order(dbSort, { ascending: dir === 'asc' })
+      .range(from, to);
+
     if (error) {
-      console.error('Error fetching admin students (legacy)', { requestId: req.requestId, error: error.message });
+      console.error('Error fetching admin students (paged)', { requestId: req.requestId, error: error.message });
       return sendError(res, 500, 'SUPABASE_ERROR', 'Failed to fetch students');
     }
 
-    return res.json(data || []);
+    return res.json({
+      rows: rows || [],
+      total: count || 0,
+      page,
+      pageSize,
+    });
   } catch (e) {
     console.error('admin/students error', { requestId: req.requestId, message: e?.message });
     return sendError(res, 500, 'SERVER_ERROR', 'Server error');
   }
 });
+
 
 
 // PATCH /api/diploma/admin/students/:id
