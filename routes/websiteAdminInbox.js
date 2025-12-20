@@ -189,73 +189,115 @@ module.exports = function createWebsiteAdminInboxRouter({ supabase, sendError })
 
   // PATCH /api/admin/inbox/:source_table/:source_id
   // body: { source_status?, assigned_to?, lead_status? }
-  router.patch('/inbox/:source_table/:source_id', async (req, res) => {
-    try {
-      const { source_table, source_id } = req.params;
-      if (!ALLOWED_SOURCES.has(source_table)) {
-        return sendError(res, 400, 'BAD_REQUEST', 'Unsupported source_table');
-      }
-
-      const source_status = req.body?.source_status !== undefined ? String(req.body.source_status) : undefined;
-      const assigned_to = req.body?.assigned_to !== undefined ? normalizeUuidOrNull(req.body.assigned_to) : undefined;
-      const lead_status = req.body?.lead_status !== undefined ? String(req.body.lead_status) : undefined;
-
-      const inboxRow = await getInboxRow({ supabase, source_table, source_id });
-      const lead = await getOrCreateLead({ supabase, source_table, source_id });
-
-      // Update source row columns (only if provided)
-      const sourceUpdate = {};
-      if (source_status !== undefined) sourceUpdate.status = source_status;
-      if (assigned_to !== undefined) sourceUpdate.assigned_to = assigned_to;
-
-      if (Object.keys(sourceUpdate).length > 0) {
-        const { error: upErr } = await supabase
-          .from(source_table)
-          .update(sourceUpdate)
-          .eq('id', source_id);
-
-        if (upErr) {
-          return sendError(res, 400, 'BAD_REQUEST', 'Failed to update source row', { detail: upErr.message });
-        }
-      }
-
-      // Mirror into leads (status/assigned_to)
-      const leadUpdate = {};
-      if (assigned_to !== undefined) leadUpdate.assigned_to = assigned_to;
-      if (lead_status !== undefined) leadUpdate.status = lead_status;
-
-      if (Object.keys(leadUpdate).length > 0) {
-        const { data: updatedLead, error: leadErr } = await supabase
-          .from('leads')
-          .update(leadUpdate)
-          .eq('id', lead.id)
-          .select('*')
-          .single();
-
-        if (leadErr) {
-          return sendError(res, 400, 'BAD_REQUEST', 'Failed to update lead', { detail: leadErr.message });
-        }
-
-        // Event log
-        await supabase.from('lead_events').insert({
-          id: randomUUID(),
-          lead_id: lead.id,
-          event_kind: 'status_change',
-          title: 'Updated',
-          body: `Updated lead/source from API`,
-          from_status: lead.status,
-          to_status: updatedLead.status,
-          created_by: req.staff?.user_id || null,
-        });
-
-        return res.json({ ok: true, lead: updatedLead, inbox: inboxRow });
-      }
-
-      return res.json({ ok: true, lead, inbox: inboxRow });
-    } catch (e) {
-      return sendError(res, 500, 'SERVER_ERROR', 'Update failed', { detail: e?.message });
+ // inside routes/websiteAdminInbox.js (PATCH handler)
+router.patch('/inbox/:source_table/:source_id', async (req, res) => {
+  try {
+    const { source_table, source_id } = req.params;
+    if (!ALLOWED_SOURCES.has(source_table)) {
+      return sendError(res, 400, 'BAD_REQUEST', 'Unsupported source_table');
     }
-  });
+
+    const source_status = req.body?.source_status !== undefined ? String(req.body.source_status) : undefined;
+
+    // assigned_to may be null (unassigned)
+    const assigned_to =
+      req.body?.assigned_to === null
+        ? null
+        : req.body?.assigned_to !== undefined
+          ? normalizeUuidOrNull(req.body.assigned_to)
+          : undefined;
+
+    const lead_status = req.body?.lead_status !== undefined ? String(req.body.lead_status) : undefined;
+
+    const inboxRow = await getInboxRow({ supabase, source_table, source_id });
+    const lead = await getOrCreateLead({ supabase, source_table, source_id });
+
+    // 1) Update source row (status/assigned_to), but tolerate missing assigned_to column
+    const sourceUpdate = {};
+    if (source_status !== undefined) sourceUpdate.status = source_status;
+    if (assigned_to !== undefined) sourceUpdate.assigned_to = assigned_to;
+
+    if (Object.keys(sourceUpdate).length > 0) {
+      let { error: upErr } = await supabase
+        .from(source_table)
+        .update(sourceUpdate)
+        .eq('id', source_id);
+
+      // If assigned_to column doesn't exist on this table, retry without it
+      if (
+        upErr &&
+        sourceUpdate.assigned_to !== undefined &&
+        String(upErr.message || '').includes('column "assigned_to"')
+      ) {
+        const retryUpdate = { ...sourceUpdate };
+        delete retryUpdate.assigned_to;
+
+        if (Object.keys(retryUpdate).length > 0) {
+          const retry = await supabase.from(source_table).update(retryUpdate).eq('id', source_id);
+          upErr = retry.error;
+        } else {
+          upErr = null;
+        }
+      }
+
+      if (upErr) {
+        return sendError(res, 400, 'BAD_REQUEST', 'Failed to update source row', { detail: upErr.message });
+      }
+    }
+
+    // 2) Update lead (status/assigned_to)
+    const leadUpdate = {};
+    if (assigned_to !== undefined) leadUpdate.assigned_to = assigned_to;
+    if (lead_status !== undefined) leadUpdate.status = lead_status;
+
+    let updatedLead = lead;
+    if (Object.keys(leadUpdate).length > 0) {
+      const { data, error: leadErr } = await supabase
+        .from('leads')
+        .update(leadUpdate)
+        .eq('id', lead.id)
+        .select('*')
+        .single();
+
+      if (leadErr) {
+        return sendError(res, 400, 'BAD_REQUEST', 'Failed to update lead', { detail: leadErr.message });
+      }
+      updatedLead = data;
+    }
+
+    // 3) Log timeline events (only when something actually changed)
+    // status change
+    if (lead_status !== undefined && lead_status !== lead.status) {
+      await supabase.from('lead_events').insert({
+        id: randomUUID(),
+        lead_id: lead.id,
+        event_kind: 'status_change',
+        title: 'Status changed',
+        body: `Lead status changed: ${lead.status} → ${updatedLead.status}`,
+        from_status: lead.status,
+        to_status: updatedLead.status,
+        created_by: req.staff?.user_id || null,
+      });
+    }
+
+    // assignment change
+    if (assigned_to !== undefined && assigned_to !== lead.assigned_to) {
+      await supabase.from('lead_events').insert({
+        id: randomUUID(),
+        lead_id: lead.id,
+        event_kind: 'other',
+        title: 'Assigned',
+        body: assigned_to ? `Assigned to staff_id: ${assigned_to}` : 'Unassigned',
+        created_by: req.staff?.user_id || null,
+      });
+    }
+
+    return res.json({ ok: true, lead: updatedLead, inbox: inboxRow });
+  } catch (e) {
+    return sendError(res, 500, 'SERVER_ERROR', 'Update failed', { detail: e?.message });
+  }
+});
+
 
   // POST /api/admin/inbox/:source_table/:source_id/note
   router.post('/inbox/:source_table/:source_id/note', async (req, res) => {
