@@ -1,3 +1,5 @@
+// index.js
+
 require('dotenv').config();
 
 const express = require('express');
@@ -8,6 +10,14 @@ const { createClient } = require('@supabase/supabase-js');
 const { randomUUID } = require('crypto');
 
 const { sendWelcomeToDiplomaPortal } = require('./email/sendWelcomeEmail');
+
+// ✅ NEW: Website admin (forms inbox + staff management)
+const createRequireWebsiteStaff = require('./middleware/requireWebsiteStaff');
+const createWebsiteAdminInboxRouter = require('./routes/websiteAdminInbox');
+const createWebsiteAdminStaffRouter = require('./routes/websiteAdminStaff');
+
+
+
 
 const app = express();
 app.set('etag', false); // disable 304/ETag for API responses
@@ -155,6 +165,37 @@ function requireAdmin(req, res, next) {
   }
   next();
 }
+
+// ✅ NEW: Website admin staff gate (Auth0 token + staff table)
+const requireWebsiteStaff = createRequireWebsiteStaff({ supabase, sendError });
+const requireAnyAdmin = requireWebsiteStaff(); // no args, just active staff
+
+
+// ✅ NEW: Website admin routers (forms inbox + staff management)
+const websiteAdminInboxRouter = createWebsiteAdminInboxRouter({ supabase, sendError });
+const websiteAdminStaffRouter = createWebsiteAdminStaffRouter({ supabase, sendError });
+
+// --------------------------------------------------
+//  WEBSITE ADMIN – FORMS INBOX + STAFF MANAGEMENT
+// --------------------------------------------------
+//
+// Uses Auth0 authentication (same as diploma) PLUS staff table gating.
+// - viewer/admin/super_admin: inbox access
+// - super_admin only: staff management
+
+app.use(
+  '/api/admin',
+  authenticateJwt,
+  requireAnyAdmin,
+  websiteAdminInboxRouter
+);
+
+app.use(
+  '/api/admin',
+  authenticateJwt,
+  requireAnyAdmin,
+  websiteAdminStaffRouter
+);
 
 // --------------------------------------------------
 //  STUDENT-FACING ROUTES
@@ -333,7 +374,7 @@ app.get('/api/diploma/announcements', authenticateJwt, async (req, res) => {
 //  ADMIN – UPDATE / DELETE INDIVIDUAL ITEMS
 // --------------------------------------------------
 
-app.patch('/api/diploma/admin/items/:itemId', authenticateJwt, requireAdmin, async (req, res) => {
+app.patch('/api/diploma/admin/items/:itemId', authenticateJwt, requireAnyAdmin, async (req, res) => {
   const itemId = req.params.itemId;
 
   if (!itemId) return sendError(res, 400, 'BAD_REQUEST', 'Item id is required');
@@ -382,7 +423,7 @@ app.patch('/api/diploma/admin/items/:itemId', authenticateJwt, requireAdmin, asy
   return res.json(data);
 });
 
-app.delete('/api/diploma/admin/items/:itemId', authenticateJwt, requireAdmin, async (req, res) => {
+app.delete('/api/diploma/admin/items/:itemId', authenticateJwt, requireAnyAdmin, async (req, res) => {
   const itemId = req.params.itemId;
   if (!itemId) return sendError(res, 400, 'BAD_REQUEST', 'Item id is required');
 
@@ -403,7 +444,7 @@ app.delete('/api/diploma/admin/items/:itemId', authenticateJwt, requireAdmin, as
 //  ADMIN – STUDENTS LIST
 // --------------------------------------------------
 
-app.get('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (req, res) => {
+app.get('/api/diploma/admin/students', authenticateJwt, requireAnyAdmin, async (req, res) => {
   try {
     const q = String(req.query.q || req.query.query || '').trim();
     const cohort = String(req.query.cohort || '').trim();
@@ -448,7 +489,6 @@ app.get('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (req
           'drive_folder_url',
           'created_at',
           'updated_at',
-          // ✅ NEW fields (safe for list even if UI doesn't use them yet)
           'diploma_tier',
           'has_signed_agreement',
           'invited_at',
@@ -573,7 +613,7 @@ app.get('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (req
 //  ADMIN – CREATE STUDENT (WITH INVITE)
 // --------------------------------------------------
 
-app.post('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (req, res) => {
+app.post('/api/diploma/admin/students', authenticateJwt, requireAnyAdmin, async (req, res) => {
   try {
     const {
       full_name,
@@ -584,7 +624,6 @@ app.post('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (re
       auth0_sub,
       send_invite,
 
-      // ✅ NEW fields (nullable)
       diploma_tier,
       parent_name,
       parent_mobile,
@@ -634,7 +673,6 @@ app.post('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (re
       drive_folder_url: cleanStringOrNull(drive_folder_url),
       auth0_sub: cleanStringOrNull(auth0_sub),
 
-      // ✅ NEW fields
       diploma_tier: cleanTier,
       parent_name: cleanStringOrNull(parent_name),
       parent_mobile: cleanStringOrNull(parent_mobile),
@@ -674,7 +712,6 @@ app.post('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (re
 
           invite = { requested: true, ok: true, skipped: false, sendResult };
 
-          // ✅ Persist invite status (best-effort; never blocks creation success)
           try {
             await recordInviteStatus({ studentId: data.id, sendResult });
           } catch (persistErr) {
@@ -707,7 +744,7 @@ app.post('/api/diploma/admin/students', authenticateJwt, requireAdmin, async (re
 //  ADMIN – UPDATE/GET STUDENT
 // --------------------------------------------------
 
-app.patch('/api/diploma/admin/students/:id', authenticateJwt, requireAdmin, async (req, res) => {
+app.patch('/api/diploma/admin/students/:id', authenticateJwt, requireAnyAdmin, async (req, res) => {
   const id = req.params.id;
 
   const {
@@ -718,7 +755,6 @@ app.patch('/api/diploma/admin/students/:id', authenticateJwt, requireAdmin, asyn
     email,
     auth0_sub,
 
-    // ✅ NEW fields
     diploma_tier,
     parent_name,
     parent_mobile,
@@ -776,7 +812,7 @@ app.patch('/api/diploma/admin/students/:id', authenticateJwt, requireAdmin, asyn
   return res.json(data);
 });
 
-app.get('/api/diploma/admin/students/:id', authenticateJwt, requireAdmin, async (req, res) => {
+app.get('/api/diploma/admin/students/:id', authenticateJwt, requireAnyAdmin, async (req, res) => {
   const id = req.params.id;
 
   const { data, error } = await supabase
@@ -793,7 +829,7 @@ app.get('/api/diploma/admin/students/:id', authenticateJwt, requireAdmin, async 
   return res.json(data);
 });
 
-app.post('/api/diploma/admin/students/:id/send-invite', authenticateJwt, requireAdmin, async (req, res) => {
+app.post('/api/diploma/admin/students/:id/send-invite', authenticateJwt, requireAnyAdmin, async (req, res) => {
   try {
     const studentId = req.params.id;
 
@@ -839,7 +875,7 @@ app.post('/api/diploma/admin/students/:id/send-invite', authenticateJwt, require
 //  ADMIN – PER-STUDENT ITEMS
 // --------------------------------------------------
 
-app.get('/api/diploma/admin/students/:studentId/items', authenticateJwt, requireAdmin, async (req, res) => {
+app.get('/api/diploma/admin/students/:studentId/items', authenticateJwt, requireAnyAdmin, async (req, res) => {
   const studentId = req.params.studentId;
   if (!studentId) return sendError(res, 400, 'BAD_REQUEST', 'Student id is required');
 
@@ -858,7 +894,7 @@ app.get('/api/diploma/admin/students/:studentId/items', authenticateJwt, require
   return res.json(data || []);
 });
 
-app.post('/api/diploma/admin/students/:studentId/items', authenticateJwt, requireAdmin, async (req, res) => {
+app.post('/api/diploma/admin/students/:studentId/items', authenticateJwt, requireAnyAdmin, async (req, res) => {
   const studentId = req.params.studentId;
   if (!studentId) return sendError(res, 400, 'BAD_REQUEST', 'Student id is required');
 
@@ -902,7 +938,7 @@ app.post('/api/diploma/admin/students/:studentId/items', authenticateJwt, requir
 //  ADMIN – ANNOUNCEMENTS
 // --------------------------------------------------
 
-app.get('/api/diploma/admin/announcements', authenticateJwt, requireAdmin, async (req, res) => {
+app.get('/api/diploma/admin/announcements', authenticateJwt, requireAnyAdmin, async (req, res) => {
   const { data, error } = await supabase
     .from('diploma_announcements')
     .select('*')
@@ -916,7 +952,7 @@ app.get('/api/diploma/admin/announcements', authenticateJwt, requireAdmin, async
   return res.json(data || []);
 });
 
-app.post('/api/diploma/admin/announcements', authenticateJwt, requireAdmin, async (req, res) => {
+app.post('/api/diploma/admin/announcements', authenticateJwt, requireAnyAdmin, async (req, res) => {
   const { title, body, drive_link_url, audience, starts_at, ends_at } = req.body || {};
 
   if (!title) {
