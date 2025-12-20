@@ -153,18 +153,6 @@ function authenticateJwt(req, res, next) {
   });
 }
 
-// ---------- Helper: admin role check ----------
-function isAdmin(user) {
-  const roles = user?.['https://ausa.io/claims/roles'] || user?.roles || [];
-  return Array.isArray(roles) && roles.includes('ausa_admin');
-}
-
-function requireAdmin(req, res, next) {
-  if (!isAdmin(req.user)) {
-    return sendError(res, 403, 'FORBIDDEN', 'Admin role required');
-  }
-  next();
-}
 
 // ✅ NEW: Website admin staff gate (Auth0 token + staff table)
 const requireWebsiteStaff = createRequireWebsiteStaff({ supabase, sendError });
@@ -179,7 +167,7 @@ const websiteAdminStaffRouter = createWebsiteAdminStaffRouter({ supabase, sendEr
 //  WEBSITE ADMIN – FORMS INBOX + STAFF MANAGEMENT
 // --------------------------------------------------
 //
-// Uses Auth0 authentication (same as diploma) PLUS staff table gating.
+// Uses Auth0 authentication (same as diploma) PLUS staff table gating (active staff = admin).
 // - viewer/admin/super_admin: inbox access
 // - super_admin only: staff management
 
@@ -196,6 +184,25 @@ app.use(
   requireAnyAdmin,
   websiteAdminStaffRouter
 );
+
+// Debugging temp
+app.get('/api/admin/debug/whoami', authenticateJwt, async (req, res) => {
+  const sub = req.user?.sub || null;
+  const email =
+    req.user?.email ||
+    req.user?.['https://ausa.io/email'] ||
+    req.user?.['https://ausa.io/claims/email'] ||
+    null;
+
+  const { data: staff } = await supabase
+    .from('staff')
+    .select('user_id, email, auth0_sub, active, role')
+    .or(`auth0_sub.eq.${sub},email.eq.${(email || '').toLowerCase()}`)
+    .maybeSingle();
+
+  res.json({ sub, email, staff, requestId: req.requestId });
+});
+
 
 // --------------------------------------------------
 //  STUDENT-FACING ROUTES
