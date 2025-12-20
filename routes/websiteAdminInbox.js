@@ -92,55 +92,74 @@ async function getOrCreateLead({ supabase, source_table, source_id, assigned_to,
 module.exports = function createWebsiteAdminInboxRouter({ supabase, sendError }) {
   const router = express.Router();
 
-  // GET /api/admin/inbox?scope=open|all&page=&pageSize=&q=&kind=&source_table=&assigned_to=
-  router.get('/inbox', async (req, res) => {
-    try {
-      const scope = String(req.query.scope || 'open');
-      const view = scope === 'all' ? 'v_inbox_all' : 'v_inbox_open';
+ // GET /api/admin/inbox?scope=open|all&page=&pageSize=&q=&kind=&source_table=&assigned_to=&status=&sort=&dir=
+router.get('/inbox', async (req, res) => {
+  try {
+    const scope = String(req.query.scope || 'open');
+    const view = scope === 'all' ? 'v_inbox_all' : 'v_inbox_open';
 
-      const q = String(req.query.q || '').trim();
-      const kind = String(req.query.kind || '').trim();
-      const source_table = String(req.query.source_table || '').trim();
-      const assigned_to = String(req.query.assigned_to || '').trim();
+    const q = String(req.query.q || '').trim();
+    const kind = String(req.query.kind || '').trim();
+    const source_table = String(req.query.source_table || '').trim();
+    const assigned_to = String(req.query.assigned_to || '').trim();
 
-      const page = Math.max(1, Number(req.query.page || 1));
-      const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize || 25)));
-      const from = (page - 1) * pageSize;
-      const to = from + pageSize - 1;
+    // ✅ new: server-side status filter
+    const status = String(req.query.status || '').trim();
 
-      let sb = supabase
-        .from(view)
-        .select('*', { count: 'exact' })
-        .order('created_at', { ascending: false });
+    // ✅ new: sorting
+    const sort = String(req.query.sort || 'created_at').trim();
+    const dir = String(req.query.dir || 'desc').trim() === 'asc' ? 'asc' : 'desc';
+    const SORT_ALLOW = new Set(['created_at', 'status', 'assigned_to', 'kind']);
+    const sortCol = SORT_ALLOW.has(sort) ? sort : 'created_at';
 
-      if (kind) sb = sb.eq('kind', kind);
-      if (source_table) sb = sb.eq('source_table', source_table);
-      if (assigned_to) sb = sb.eq('assigned_to', assigned_to);
+    const page = Math.max(1, Number(req.query.page || 1));
+    const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize || 25)));
+    const from = (page - 1) * pageSize;
+    const to = from + pageSize - 1;
 
-      if (q) {
-        const like = `%${q}%`;
-        sb = sb.or(
-          [
-            `full_name.ilike.${like}`,
-            `email.ilike.${like}`,
-            `organization_name.ilike.${like}`,
-            `city.ilike.${like}`,
-            `interest_summary.ilike.${like}`,
-          ].join(',')
-        );
-      }
+    let sb = supabase
+      .from(view)
+      .select('*', { count: 'exact' });
 
-      const { data, error, count } = await sb.range(from, to);
+    if (kind) sb = sb.eq('kind', kind);
+    if (source_table) sb = sb.eq('source_table', source_table);
+    if (assigned_to) sb = sb.eq('assigned_to', assigned_to);
 
-      if (error) {
-        return sendError(res, 500, 'SUPABASE_ERROR', 'Failed to fetch inbox', { detail: error.message });
-      }
+    // ✅ apply status filter
+    if (status) sb = sb.eq('status', status);
 
-      return res.json({ rows: data || [], total: count || 0, page, pageSize });
-    } catch (e) {
-      return sendError(res, 500, 'SERVER_ERROR', 'Inbox list failed', { detail: e?.message });
+    if (q) {
+      const like = `%${q}%`;
+      sb = sb.or(
+        [
+          `full_name.ilike.${like}`,
+          `email.ilike.${like}`,
+          `organization_name.ilike.${like}`,
+          `city.ilike.${like}`,
+          `interest_summary.ilike.${like}`,
+        ].join(',')
+      );
     }
-  });
+
+    // ✅ apply sorting (stable secondary sort)
+    sb = sb.order(sortCol, { ascending: dir === 'asc' });
+
+    if (sortCol !== 'created_at') {
+      sb = sb.order('created_at', { ascending: false });
+    }
+
+    const { data, error, count } = await sb.range(from, to);
+
+    if (error) {
+      return sendError(res, 500, 'SUPABASE_ERROR', 'Failed to fetch inbox', { detail: error.message });
+    }
+
+    return res.json({ rows: data || [], total: count || 0, page, pageSize });
+  } catch (e) {
+    return sendError(res, 500, 'SERVER_ERROR', 'Inbox list failed', { detail: e?.message });
+  }
+});
+
 
   // GET /api/admin/inbox/:source_table/:source_id
   router.get('/inbox/:source_table/:source_id', async (req, res) => {
@@ -186,6 +205,103 @@ module.exports = function createWebsiteAdminInboxRouter({ supabase, sendError })
       return sendError(res, 500, 'SERVER_ERROR', 'Inbox detail failed', { detail: e?.message });
     }
   });
+
+
+  async function applyInboxUpdate({
+  supabase,
+  sendError,
+  req,
+  source_table,
+  source_id,
+  source_status,
+  assigned_to,
+  lead_status,
+}) {
+  const inboxRow = await getInboxRow({ supabase, source_table, source_id });
+  const lead = await getOrCreateLead({ supabase, source_table, source_id });
+
+  // 1) Update source row (status/assigned_to), but tolerate missing assigned_to column
+  const sourceUpdate = {};
+  if (source_status !== undefined) sourceUpdate.status = source_status;
+  if (assigned_to !== undefined) sourceUpdate.assigned_to = assigned_to;
+
+  if (Object.keys(sourceUpdate).length > 0) {
+    let { error: upErr } = await supabase.from(source_table).update(sourceUpdate).eq('id', source_id);
+
+    // If assigned_to column doesn't exist, retry without it
+    if (
+      upErr &&
+      sourceUpdate.assigned_to !== undefined &&
+      String(upErr.message || '').includes('column "assigned_to"')
+    ) {
+      const retryUpdate = { ...sourceUpdate };
+      delete retryUpdate.assigned_to;
+
+      if (Object.keys(retryUpdate).length > 0) {
+        const retry = await supabase.from(source_table).update(retryUpdate).eq('id', source_id);
+        upErr = retry.error;
+      } else {
+        upErr = null;
+      }
+    }
+
+    if (upErr) {
+      const err = new Error(upErr.message || 'Failed to update source row');
+      err.code = 'SOURCE_UPDATE_FAILED';
+      throw err;
+    }
+  }
+
+  // 2) Update lead (status/assigned_to)
+  const leadUpdate = {};
+  if (assigned_to !== undefined) leadUpdate.assigned_to = assigned_to;
+  if (lead_status !== undefined) leadUpdate.status = lead_status;
+
+  let updatedLead = lead;
+  if (Object.keys(leadUpdate).length > 0) {
+    const { data, error: leadErr } = await supabase
+      .from('leads')
+      .update(leadUpdate)
+      .eq('id', lead.id)
+      .select('*')
+      .single();
+
+    if (leadErr) {
+      const err = new Error(leadErr.message || 'Failed to update lead');
+      err.code = 'LEAD_UPDATE_FAILED';
+      throw err;
+    }
+    updatedLead = data;
+  }
+
+  // 3) Log timeline events only if changes occurred
+  if (lead_status !== undefined && lead_status !== lead.status) {
+    await supabase.from('lead_events').insert({
+      id: randomUUID(),
+      lead_id: lead.id,
+      event_kind: 'status_change',
+      title: 'Status changed',
+      body: `Lead status changed: ${lead.status} → ${updatedLead.status}`,
+      from_status: lead.status,
+      to_status: updatedLead.status,
+      created_by: req.staff?.user_id || null,
+    });
+  }
+
+  if (assigned_to !== undefined && assigned_to !== lead.assigned_to) {
+    await supabase.from('lead_events').insert({
+      id: randomUUID(),
+      lead_id: lead.id,
+      event_kind: 'other',
+      title: 'Assigned',
+      body: assigned_to ? `Assigned to staff_id: ${assigned_to}` : 'Unassigned',
+      created_by: req.staff?.user_id || null,
+    });
+  }
+
+  return { inboxRow, lead: updatedLead };
+}
+
 
   // PATCH /api/admin/inbox/:source_table/:source_id
   // body: { source_status?, assigned_to?, lead_status? }
@@ -297,6 +413,87 @@ router.patch('/inbox/:source_table/:source_id', async (req, res) => {
     return sendError(res, 500, 'SERVER_ERROR', 'Update failed', { detail: e?.message });
   }
 });
+
+// POST /api/admin/inbox/bulk
+// body: { items: [{source_table, source_id}], source_status?, assigned_to?, lead_status? }
+router.post('/inbox/bulk', async (req, res) => {
+  try {
+    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+    if (items.length < 1) {
+      return sendError(res, 400, 'BAD_REQUEST', 'items[] is required');
+    }
+    if (items.length > 200) {
+      return sendError(res, 400, 'BAD_REQUEST', 'Too many items (max 200 per request)');
+    }
+
+    const source_status =
+      req.body?.source_status !== undefined ? String(req.body.source_status) : undefined;
+
+    // assigned_to may be null (unassigned)
+    const assigned_to =
+      req.body?.assigned_to === null
+        ? null
+        : req.body?.assigned_to !== undefined
+          ? normalizeUuidOrNull(req.body.assigned_to)
+          : undefined;
+
+    const lead_status =
+      req.body?.lead_status !== undefined ? String(req.body.lead_status) : undefined;
+
+    if (source_status === undefined && assigned_to === undefined && lead_status === undefined) {
+      return sendError(
+        res,
+        400,
+        'BAD_REQUEST',
+        'At least one of source_status, assigned_to, or lead_status must be provided'
+      );
+    }
+
+    const results = {
+      success: 0,
+      failed: [], // { source_table, source_id, error }
+    };
+
+    for (const it of items) {
+      const source_table = String(it?.source_table || '').trim();
+      const source_id = String(it?.source_id || '').trim();
+
+      if (!ALLOWED_SOURCES.has(source_table) || !source_id) {
+        results.failed.push({
+          source_table,
+          source_id,
+          error: 'Invalid source_table or source_id',
+        });
+        continue;
+      }
+
+      try {
+        await applyInboxUpdate({
+          supabase,
+          sendError,
+          req,
+          source_table,
+          source_id,
+          source_status,
+          assigned_to,
+          lead_status,
+        });
+        results.success += 1;
+      } catch (e) {
+        results.failed.push({
+          source_table,
+          source_id,
+          error: e?.message || 'Update failed',
+        });
+      }
+    }
+
+    return res.json({ ok: true, results });
+  } catch (e) {
+    return sendError(res, 500, 'SERVER_ERROR', 'Bulk update failed', { detail: e?.message });
+  }
+});
+
 
 
   // POST /api/admin/inbox/:source_table/:source_id/note
