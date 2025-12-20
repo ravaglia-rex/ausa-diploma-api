@@ -8,17 +8,6 @@ function normalizeEmail(v) {
   return s ? s : null;
 }
 
-/**
- * Factory router.
- * Mounted behind:
- *   authenticateJwt,
- *   requireAnyAdmin (staff.active === true)
- *
- * Simplified rules:
- * - Any active admin can list/invite/deactivate other admins
- * - invite accepts only: { email, active? }
- * - role is hardcoded to whatever your DB constraint allows (usually 'admin')
- */
 module.exports = function createWebsiteAdminStaffRouter({ supabase, sendError }) {
   const router = express.Router();
 
@@ -29,9 +18,7 @@ module.exports = function createWebsiteAdminStaffRouter({ supabase, sendError })
       .select('user_id, auth0_sub, email, role, active, created_at')
       .order('created_at', { ascending: false });
 
-    if (error) {
-      return sendError(res, 500, 'SUPABASE_ERROR', 'Failed to list staff', { detail: error.message });
-    }
+    if (error) return sendError(res, 500, 'SUPABASE_ERROR', 'Failed to list staff', { detail: error.message });
     return res.json(data || []);
   });
 
@@ -44,13 +31,14 @@ module.exports = function createWebsiteAdminStaffRouter({ supabase, sendError })
 
       if (!email) return sendError(res, 400, 'BAD_REQUEST', 'email is required');
 
-      // IMPORTANT: this must satisfy your staff_role_check constraint.
-      // In most setups this is 'admin'. If your constraint only allows something else,
-      // change this constant to an allowed value.
+      // Must satisfy staff_role_check constraint in your DB.
+      // If your constraint is different, change this to an allowed value.
       const DEFAULT_STAFF_ROLE = 'admin';
 
-      // Insert (auth0_sub will be linked automatically on first login by middleware)
-      const { data, error } = await supabase
+      // Try insert first
+      let inserted = null;
+
+      const { data: created, error: insErr } = await supabase
         .from('staff')
         .insert({
           email,
@@ -61,14 +49,41 @@ module.exports = function createWebsiteAdminStaffRouter({ supabase, sendError })
         .select('user_id, auth0_sub, email, role, active, created_at')
         .single();
 
-      if (error) {
-        return sendError(res, 400, 'SUPABASE_ERROR', 'Failed to create staff record', { detail: error.message });
+      if (!insErr) {
+        inserted = created;
       }
 
-      // Send invite email with /admin + /diploma/admin links
+      // If insert failed due to unique violation on email, update existing row to active=true (and update email casing)
+      if (insErr) {
+        const msg = String(insErr.message || '');
+
+        const looksLikeDuplicate =
+          msg.toLowerCase().includes('duplicate') ||
+          msg.toLowerCase().includes('unique') ||
+          msg.toLowerCase().includes('staff_email_unique');
+
+        if (!looksLikeDuplicate) {
+          return sendError(res, 400, 'SUPABASE_ERROR', 'Failed to create staff record', { detail: insErr.message });
+        }
+
+        const { data: updated, error: updErr } = await supabase
+          .from('staff')
+          .update({ active: true, email })
+          .eq('email', email)
+          .select('user_id, auth0_sub, email, role, active, created_at')
+          .single();
+
+        if (updErr) {
+          return sendError(res, 500, 'SUPABASE_ERROR', 'Failed to re-activate existing admin', { detail: updErr.message });
+        }
+
+        inserted = updated;
+      }
+
+      // Send invite email (idempotent behavior: always send on invite)
       const inviteSend = await sendAdminInviteEmail({ toEmail: email });
 
-      return res.status(201).json({ ok: true, staff: data, inviteSend });
+      return res.status(201).json({ ok: true, staff: inserted, inviteSend });
     } catch (e) {
       return sendError(res, 500, 'SERVER_ERROR', 'Invite failed', { detail: e?.message });
     }
@@ -88,6 +103,22 @@ module.exports = function createWebsiteAdminStaffRouter({ supabase, sendError })
         return sendError(res, 400, 'BAD_REQUEST', 'No fields to update');
       }
 
+      // Guard: prevent disabling the last active admin
+      if (patch.active === false) {
+        const { count, error: countErr } = await supabase
+          .from('staff')
+          .select('user_id', { count: 'exact', head: true })
+          .eq('active', true);
+
+        if (countErr) {
+          return sendError(res, 500, 'SUPABASE_ERROR', 'Failed to validate active admin count', { detail: countErr.message });
+        }
+
+        if ((count || 0) <= 1) {
+          return sendError(res, 400, 'BAD_REQUEST', 'Cannot deactivate the last active admin.');
+        }
+      }
+
       const { data, error } = await supabase
         .from('staff')
         .update(patch)
@@ -95,9 +126,7 @@ module.exports = function createWebsiteAdminStaffRouter({ supabase, sendError })
         .select('user_id, auth0_sub, email, role, active, created_at')
         .single();
 
-      if (error) {
-        return sendError(res, 500, 'SUPABASE_ERROR', 'Failed to update staff', { detail: error.message });
-      }
+      if (error) return sendError(res, 500, 'SUPABASE_ERROR', 'Failed to update staff', { detail: error.message });
 
       return res.json({ ok: true, staff: data });
     } catch (e) {
