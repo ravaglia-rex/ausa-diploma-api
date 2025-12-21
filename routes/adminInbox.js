@@ -93,6 +93,7 @@ router.get('/inbox/statuses',  async (req, res) => {
 });
 
 // ---- List inbox ----
+// ---- List inbox ----
 router.get('/inbox', async (req, res) => {
   const requestId = getRequestId(req, res);
   try {
@@ -134,11 +135,44 @@ router.get('/inbox', async (req, res) => {
     const { data, error, count } = await query.range(from, to);
     if (error) return jsonError(res, 500, 'DB_ERROR', error.message, requestId);
 
-    return res.json({ data, count, page, pageSize });
+    // Backward/forward compatible payload:
+    // - Some clients expect { data, count }
+    // - Others expect { rows, total }
+    // - Some want camelCase keys and a stable "id" for React lists.
+    const rows = (Array.isArray(data) ? data : []).map((r) => ({
+      ...r,
+
+      // Stable id for UI list keys/navigation
+      id: `${r.source_table}:${r.source_id}`,
+
+      // CamelCase aliases (safe, optional for clients)
+      sourceTable: r.source_table,
+      sourceId: r.source_id,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+      fullName: r.full_name,
+      organizationName: r.organization_name,
+      assignedTo: r.assigned_to,
+      sourcePage: r.source_page,
+      interestSummary: r.interest_summary,
+    }));
+
+    return res.json({
+      // current keys
+      data: rows,
+      count: count || 0,
+      page,
+      pageSize,
+
+      // compatibility keys
+      rows,
+      total: count || 0,
+    });
   } catch (e) {
     return jsonError(res, 500, 'SERVER_ERROR', 'Failed to list inbox', requestId, e?.message || String(e));
   }
 });
+
 
 // ---- Detail: source row + lead + events ----
 router.get('/inbox/:source_table/:source_id', async (req, res) => {
