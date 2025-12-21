@@ -13,7 +13,7 @@ const { sendWelcomeToDiplomaPortal } = require('./email/sendWelcomeEmail');
 
 // ✅ NEW: Website admin (forms inbox + staff management)
 const createRequireWebsiteStaff = require('./middleware/requireWebsiteStaff');
-const createWebsiteAdminInboxRouter = require('./routes/websiteAdminInbox');
+const adminInboxRouter = require('./routes/adminInbox');
 const createWebsiteAdminStaffRouter = require('./routes/websiteAdminStaff');
 
 
@@ -159,34 +159,33 @@ const requireWebsiteStaff = createRequireWebsiteStaff({ supabase, sendError });
 const requireAnyAdmin = requireWebsiteStaff(); // no args, just active staff
 
 
-// ✅ NEW: Website admin routers (forms inbox + staff management)
-const websiteAdminInboxRouter = createWebsiteAdminInboxRouter({ supabase, sendError });
+// ✅ NEW: Website admin routers (forms inbox + staff management
 const websiteAdminStaffRouter = createWebsiteAdminStaffRouter({ supabase, sendError });
+
 
 // --------------------------------------------------
 //  WEBSITE ADMIN – FORMS INBOX + STAFF MANAGEMENT
 // --------------------------------------------------
-//
-// Uses Auth0 authentication (same as diploma) PLUS staff table gating (active staff = admin).
-// - viewer/admin/super_admin: inbox access
-// - super_admin only: staff management
 
-app.use(
-  '/api/admin',
-  authenticateJwt,
-  requireAnyAdmin,
-  websiteAdminInboxRouter
-);
+function requireSuperAdminOnly(req, res, next) {
+  const role = req.staff?.role || null;
+  if (role === 'super_admin') return next();
+  return sendError(res, 403, 'FORBIDDEN', 'Super admin required');
+}
 
-app.use(
-  '/api/admin',
-  authenticateJwt,
-  requireAnyAdmin,
-  websiteAdminStaffRouter
-);
+const adminRouter = express.Router();
 
-// Debugging temp
-app.get('/api/admin/debug/whoami', authenticateJwt, async (req, res) => {
+// Gate everything under /api/admin with Auth0 + active staff
+adminRouter.use(authenticateJwt, requireAnyAdmin);
+
+// Inbox routes (includes GET /inbox/statuses, /inbox, /inbox/:source_table/:source_id, etc.)
+adminRouter.use(adminInboxRouter);
+
+// Staff routes: super_admin only
+adminRouter.use(requireSuperAdminOnly, websiteAdminStaffRouter);
+
+// Move debug whoami under the same gates (optional but recommended)
+adminRouter.get('/debug/whoami', async (req, res) => {
   const sub = req.user?.sub || null;
   const email =
     req.user?.email ||
@@ -202,6 +201,9 @@ app.get('/api/admin/debug/whoami', authenticateJwt, async (req, res) => {
 
   res.json({ sub, email, staff, requestId: req.requestId });
 });
+
+// Mount the admin router
+app.use('/api/admin', adminRouter);
 
 
 // --------------------------------------------------

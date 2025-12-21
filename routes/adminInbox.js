@@ -14,8 +14,88 @@ const {
 
 const router = express.Router();
 
+// ------------------------------
+// Helpers
+// ------------------------------
+function getRequestId(req, res) {
+  return (
+    (req && (req.requestId || req.id)) ||
+    res.getHeader('x-request-id') ||
+    res.getHeader('X-Request-Id') ||
+    undefined
+  );
+}
+
+function jsonError(res, status, code, message, requestId, detail) {
+  return res.status(status).json({
+    error: {
+      code,
+      message,
+      requestId,
+      ...(detail ? { detail } : {}),
+    },
+  });
+}
+
+// Cache inbox_status for a short time to avoid DB hits on every patch/reply
+let _statusCache = { at: 0, ttlMs: 30_000, list: null, set: null };
+
+async function loadInboxStatuses() {
+  const now = Date.now();
+  if (_statusCache.list && _statusCache.set && now - _statusCache.at < _statusCache.ttlMs) {
+    return { list: _statusCache.list, set: _statusCache.set };
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from('inbox_status')
+    .select('code,label,sort_order,is_terminal')
+    .order('sort_order', { ascending: true })
+    .order('code', { ascending: true });
+
+  if (error) throw error;
+
+  const list = (data || []).map((r) => ({
+    value: r.code,
+    label: r.label,
+    sortOrder: r.sort_order,
+    isTerminal: r.is_terminal,
+  }));
+
+  const set = new Set(list.map((x) => x.value));
+
+  _statusCache = { ..._statusCache, at: now, list, set };
+  return { list, set };
+}
+
+async function assertValidStatusOrThrow(statusValue) {
+  const { set } = await loadInboxStatuses();
+  return set.has(statusValue);
+}
+
+// ------------------------------
+// NEW: GET /api/admin/inbox/statuses
+// (Assumes this router is mounted at /api/admin)
+// ------------------------------
+router.get('/inbox/statuses', requireStaff(['admin', 'super_admin']), async (req, res) => {
+  const requestId = getRequestId(req, res);
+  try {
+    const { list } = await loadInboxStatuses();
+    return res.json({ data: list });
+  } catch (e) {
+    return jsonError(
+      res,
+      500,
+      'DB_ERROR',
+      'Failed to load inbox statuses',
+      requestId,
+      e?.message || String(e)
+    );
+  }
+});
+
 // ---- List inbox ----
 router.get('/inbox', requireStaff(['admin', 'super_admin']), async (req, res) => {
+  const requestId = getRequestId(req, res);
   try {
     const scope = (req.query.scope || 'open').toString(); // open | all
     const view = scope === 'all' ? 'v_inbox_all' : 'v_inbox_open';
@@ -53,19 +133,22 @@ router.get('/inbox', requireStaff(['admin', 'super_admin']), async (req, res) =>
     }
 
     const { data, error, count } = await query.range(from, to);
-    if (error) return res.status(500).json({ error: error.message });
+    if (error) return jsonError(res, 500, 'DB_ERROR', error.message, requestId);
 
     return res.json({ data, count, page, pageSize });
   } catch (e) {
-    return res.status(500).json({ error: 'Failed to list inbox' });
+    return jsonError(res, 500, 'SERVER_ERROR', 'Failed to list inbox', requestId, e?.message || String(e));
   }
 });
 
 // ---- Detail: source row + lead + events ----
 router.get('/inbox/:source_table/:source_id', requireStaff(['admin', 'super_admin']), async (req, res) => {
+  const requestId = getRequestId(req, res);
   try {
     const { source_table, source_id } = req.params;
-    if (!ALLOWED_SOURCES.has(source_table)) return res.status(400).json({ error: 'Unsupported source_table' });
+    if (!ALLOWED_SOURCES.has(source_table)) {
+      return jsonError(res, 400, 'BAD_REQUEST', 'Unsupported source_table', requestId, source_table);
+    }
 
     const inboxRow = await getInboxRow(source_table, source_id);
 
@@ -75,7 +158,7 @@ router.get('/inbox/:source_table/:source_id', requireStaff(['admin', 'super_admi
       .eq('id', source_id)
       .single();
 
-    if (srcErr) return res.status(404).json({ error: srcErr.message });
+    if (srcErr) return jsonError(res, 404, 'NOT_FOUND', srcErr.message, requestId);
 
     const lead = await getOrCreateLead({
       source_table,
@@ -90,30 +173,60 @@ router.get('/inbox/:source_table/:source_id', requireStaff(['admin', 'super_admi
       .eq('lead_id', lead.id)
       .order('created_at', { ascending: false });
 
-    if (evErr) return res.status(500).json({ error: evErr.message });
+    if (evErr) return jsonError(res, 500, 'DB_ERROR', evErr.message, requestId);
 
     return res.json({ inbox: inboxRow, source: sourceRow, lead, events });
   } catch (e) {
-    return res.status(500).json({ error: 'Failed to load inbox item' });
+    return jsonError(res, 500, 'SERVER_ERROR', 'Failed to load inbox item', requestId, e?.message || String(e));
   }
 });
 
 // ---- Patch: update status/assigned_to on source + mirror into leads ----
+// NOTE: status values now validated against public.inbox_status (unified)
 const patchSchema = z.object({
-  // source table status is TEXT; v_inbox_open considers 'new' and 'submitted' open
   source_status: z.string().min(1).optional(),
   assigned_to: z.string().uuid().nullable().optional(),
-  // optional: set lead status (must be one of enum values)
-  lead_status: z.enum(['new', 'in_review', 'contacted', 'qualified', 'converted', 'archived']).optional(),
+  lead_status: z.string().min(1).optional(),
 });
 
 router.patch('/inbox/:source_table/:source_id', requireStaff(['admin', 'super_admin']), async (req, res) => {
+  const requestId = getRequestId(req, res);
   try {
     const { source_table, source_id } = req.params;
-    if (!ALLOWED_SOURCES.has(source_table)) return res.status(400).json({ error: 'Unsupported source_table' });
+    if (!ALLOWED_SOURCES.has(source_table)) {
+      return jsonError(res, 400, 'BAD_REQUEST', 'Unsupported source_table', requestId, source_table);
+    }
 
     const parsed = patchSchema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+    if (!parsed.success) {
+      return jsonError(res, 400, 'BAD_REQUEST', 'Invalid payload', requestId, parsed.error.flatten());
+    }
+
+    // Validate statuses against inbox_status
+    if (typeof parsed.data.source_status !== 'undefined') {
+      const ok = await assertValidStatusOrThrow(parsed.data.source_status);
+      if (!ok) {
+        return jsonError(
+          res,
+          400,
+          'INVALID_STATUS',
+          `Invalid source_status '${parsed.data.source_status}'`,
+          requestId
+        );
+      }
+    }
+    if (typeof parsed.data.lead_status !== 'undefined') {
+      const ok = await assertValidStatusOrThrow(parsed.data.lead_status);
+      if (!ok) {
+        return jsonError(
+          res,
+          400,
+          'INVALID_STATUS',
+          `Invalid lead_status '${parsed.data.lead_status}'`,
+          requestId
+        );
+      }
+    }
 
     const inboxRow = await getInboxRow(source_table, source_id);
     const lead = await getOrCreateLead({
@@ -129,27 +242,25 @@ router.patch('/inbox/:source_table/:source_id', requireStaff(['admin', 'super_ad
     if (typeof parsed.data.assigned_to !== 'undefined') updates.assigned_to = parsed.data.assigned_to;
 
     if (Object.keys(updates).length > 0) {
-      // Not every source table has assigned_to; Supabase will throw if column doesn’t exist.
-      // We handle that error cleanly.
-      const { error: upErr } = await supabaseAdmin
-        .from(source_table)
-        .update(updates)
-        .eq('id', source_id);
-
-      if (upErr) return res.status(400).json({ error: upErr.message });
+      const { error: upErr } = await supabaseAdmin.from(source_table).update(updates).eq('id', source_id);
+      if (upErr) {
+        return jsonError(res, 400, 'BAD_REQUEST', 'Failed to update source row', requestId, upErr.message);
+      }
     }
 
     // Mirror into leads table (lead_status + assigned_to)
+    // NOTE: updateLeadStatusAndAssign should accept unified status strings (TEXT) now.
     const updatedLead = await updateLeadStatusAndAssign({
       lead,
       to_status: parsed.data.lead_status,
-      assigned_to: typeof parsed.data.assigned_to !== 'undefined' ? parsed.data.assigned_to : lead.assigned_to,
+      assigned_to:
+        typeof parsed.data.assigned_to !== 'undefined' ? parsed.data.assigned_to : lead.assigned_to,
       actor_staff_id: req.staff.user_id,
     });
 
     return res.json({ ok: true, lead: updatedLead });
   } catch (e) {
-    return res.status(500).json({ error: 'Failed to update inbox item' });
+    return jsonError(res, 500, 'SERVER_ERROR', 'Failed to update inbox item', requestId, e?.message || String(e));
   }
 });
 
@@ -160,12 +271,17 @@ const noteSchema = z.object({
 });
 
 router.post('/inbox/:source_table/:source_id/note', requireStaff(['admin', 'super_admin']), async (req, res) => {
+  const requestId = getRequestId(req, res);
   try {
     const { source_table, source_id } = req.params;
-    if (!ALLOWED_SOURCES.has(source_table)) return res.status(400).json({ error: 'Unsupported source_table' });
+    if (!ALLOWED_SOURCES.has(source_table)) {
+      return jsonError(res, 400, 'BAD_REQUEST', 'Unsupported source_table', requestId, source_table);
+    }
 
     const parsed = noteSchema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+    if (!parsed.success) {
+      return jsonError(res, 400, 'BAD_REQUEST', 'Invalid payload', requestId, parsed.error.flatten());
+    }
 
     const lead = await getOrCreateLead({ source_table, source_id });
 
@@ -179,29 +295,59 @@ router.post('/inbox/:source_table/:source_id/note', requireStaff(['admin', 'supe
 
     return res.json({ ok: true });
   } catch (e) {
-    return res.status(500).json({ error: 'Failed to add note' });
+    return jsonError(res, 500, 'SERVER_ERROR', 'Failed to add note', requestId, e?.message || String(e));
   }
 });
 
 // ---- Reply via Resend + log event ----
+// NOTE: status values now validated against public.inbox_status (unified)
 const replySchema = z.object({
   to: z.string().email(),
   subject: z.string().min(1),
   text: z.string().min(1).optional(),
   html: z.string().min(1).optional(),
-  // optional status update on send (source table status)
-  set_source_status: z.string().optional(), // e.g. 'contacted'
-  // optional lead status update on send
-  set_lead_status: z.enum(['new', 'in_review', 'contacted', 'qualified', 'converted', 'archived']).optional(),
+  set_source_status: z.string().min(1).optional(),
+  set_lead_status: z.string().min(1).optional(),
 });
 
 router.post('/inbox/:source_table/:source_id/reply', requireStaff(['admin', 'super_admin']), async (req, res) => {
+  const requestId = getRequestId(req, res);
   try {
     const { source_table, source_id } = req.params;
-    if (!ALLOWED_SOURCES.has(source_table)) return res.status(400).json({ error: 'Unsupported source_table' });
+    if (!ALLOWED_SOURCES.has(source_table)) {
+      return jsonError(res, 400, 'BAD_REQUEST', 'Unsupported source_table', requestId, source_table);
+    }
 
     const parsed = replySchema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+    if (!parsed.success) {
+      return jsonError(res, 400, 'BAD_REQUEST', 'Invalid payload', requestId, parsed.error.flatten());
+    }
+
+    // Validate statuses against inbox_status
+    if (parsed.data.set_source_status) {
+      const ok = await assertValidStatusOrThrow(parsed.data.set_source_status);
+      if (!ok) {
+        return jsonError(
+          res,
+          400,
+          'INVALID_STATUS',
+          `Invalid set_source_status '${parsed.data.set_source_status}'`,
+          requestId
+        );
+      }
+    }
+    if (parsed.data.set_lead_status) {
+      const ok = await assertValidStatusOrThrow(parsed.data.set_lead_status);
+      if (!ok) {
+        return jsonError(
+          res,
+          400,
+          'INVALID_STATUS',
+          `Invalid set_lead_status '${parsed.data.set_lead_status}'`,
+          requestId
+        );
+      }
+    }
 
     const lead = await getOrCreateLead({ source_table, source_id });
 
@@ -224,21 +370,25 @@ router.post('/inbox/:source_table/:source_id/reply', requireStaff(['admin', 'sup
         sendRes?.data?.id ? `Resend ID: ${sendRes.data.id}` : null,
         '',
         parsed.data.text || '(html email sent)',
-      ].filter(Boolean).join('\n'),
+      ]
+        .filter(Boolean)
+        .join('\n'),
       created_by: req.staff.user_id,
     });
 
-    // Optional: update source status so it falls out of v_inbox_open
+    // Optional: update source status
     if (parsed.data.set_source_status) {
       const { error: upErr } = await supabaseAdmin
         .from(source_table)
         .update({ status: parsed.data.set_source_status })
         .eq('id', source_id);
 
-      if (upErr) return res.status(400).json({ error: upErr.message });
+      if (upErr) {
+        return jsonError(res, 400, 'BAD_REQUEST', 'Failed to update source status', requestId, upErr.message);
+      }
     }
 
-    // Optional: update lead status enum
+    // Optional: update lead status
     if (parsed.data.set_lead_status) {
       await updateLeadStatusAndAssign({
         lead,
@@ -250,7 +400,7 @@ router.post('/inbox/:source_table/:source_id/reply', requireStaff(['admin', 'sup
 
     return res.json({ ok: true, resend: sendRes.data || null });
   } catch (e) {
-    return res.status(500).json({ error: 'Failed to send reply' });
+    return jsonError(res, 500, 'SERVER_ERROR', 'Failed to send reply', requestId, e?.message || String(e));
   }
 });
 
