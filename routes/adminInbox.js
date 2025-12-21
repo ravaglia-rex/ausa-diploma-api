@@ -79,7 +79,8 @@ router.get('/inbox/statuses',  async (req, res) => {
   const requestId = getRequestId(req, res);
   try {
     const { list } = await loadInboxStatuses();
-    return res.json({ data: list });
+    //return res.json({ data: list });
+    return res.json(list);
   } catch (e) {
     return jsonError(
       res,
