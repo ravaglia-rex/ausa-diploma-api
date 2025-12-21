@@ -153,6 +153,11 @@ function authenticateJwt(req, res, next) {
   });
 }
 
+app.get('/api/debug/jwt', authenticateJwt, (req, res) => {
+  res.json({ ok: true, user: req.user, requestId: req.requestId });
+});
+
+
 
 // ✅ NEW: Website admin staff gate (Auth0 token + staff table)
 const requireWebsiteStaff = createRequireWebsiteStaff({ supabase, sendError });

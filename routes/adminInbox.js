@@ -3,7 +3,6 @@ const express = require('express');
 const { z } = require('zod');
 const { supabaseAdmin } = require('../lib/supabase');
 const { resend, RESEND_FROM_EMAIL } = require('../lib/resend');
-const { requireStaff } = require('../middleware/requireStaff');
 const {
   ALLOWED_SOURCES,
   getInboxRow,
@@ -76,7 +75,7 @@ async function assertValidStatusOrThrow(statusValue) {
 // NEW: GET /api/admin/inbox/statuses
 // (Assumes this router is mounted at /api/admin)
 // ------------------------------
-router.get('/inbox/statuses', requireStaff(['admin', 'super_admin']), async (req, res) => {
+router.get('/inbox/statuses',  async (req, res) => {
   const requestId = getRequestId(req, res);
   try {
     const { list } = await loadInboxStatuses();
@@ -94,7 +93,7 @@ router.get('/inbox/statuses', requireStaff(['admin', 'super_admin']), async (req
 });
 
 // ---- List inbox ----
-router.get('/inbox', requireStaff(['admin', 'super_admin']), async (req, res) => {
+router.get('/inbox', async (req, res) => {
   const requestId = getRequestId(req, res);
   try {
     const scope = (req.query.scope || 'open').toString(); // open | all
@@ -142,7 +141,7 @@ router.get('/inbox', requireStaff(['admin', 'super_admin']), async (req, res) =>
 });
 
 // ---- Detail: source row + lead + events ----
-router.get('/inbox/:source_table/:source_id', requireStaff(['admin', 'super_admin']), async (req, res) => {
+router.get('/inbox/:source_table/:source_id', async (req, res) => {
   const requestId = getRequestId(req, res);
   try {
     const { source_table, source_id } = req.params;
@@ -189,7 +188,7 @@ const patchSchema = z.object({
   lead_status: z.string().min(1).optional(),
 });
 
-router.patch('/inbox/:source_table/:source_id', requireStaff(['admin', 'super_admin']), async (req, res) => {
+router.patch('/inbox/:source_table/:source_id', async (req, res) => {
   const requestId = getRequestId(req, res);
   try {
     const { source_table, source_id } = req.params;
@@ -270,7 +269,7 @@ const noteSchema = z.object({
   title: z.string().optional(),
 });
 
-router.post('/inbox/:source_table/:source_id/note', requireStaff(['admin', 'super_admin']), async (req, res) => {
+router.post('/inbox/:source_table/:source_id/note', async (req, res) => {
   const requestId = getRequestId(req, res);
   try {
     const { source_table, source_id } = req.params;
@@ -310,7 +309,7 @@ const replySchema = z.object({
   set_lead_status: z.string().min(1).optional(),
 });
 
-router.post('/inbox/:source_table/:source_id/reply', requireStaff(['admin', 'super_admin']), async (req, res) => {
+router.post('/inbox/:source_table/:source_id/reply',  async (req, res) => {
   const requestId = getRequestId(req, res);
   try {
     const { source_table, source_id } = req.params;
